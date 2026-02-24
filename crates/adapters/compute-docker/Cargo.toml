@@ -1,0 +1,18 @@
+[package]
+name               = "gfs-compute-docker"
+version.workspace      = true
+edition.workspace      = true
+authors.workspace      = true
+license.workspace      = true
+repository.workspace   = true
+rust-version.workspace = true
+
+[dependencies]
+async-trait               = { workspace = true }
+bollard                   = { workspace = true }
+chrono                    = { workspace = true }
+futures-util              = { version = "0.3" }
+gfs-domain = { workspace = true }
+thiserror                 = { workspace = true }
+tokio                     = { workspace = true }
+tracing                   = { workspace = true }

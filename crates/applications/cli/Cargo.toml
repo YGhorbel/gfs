@@ -1,0 +1,30 @@
+[package]
+name               = "gfs-cli"
+version.workspace      = true
+edition.workspace      = true
+authors.workspace      = true
+license.workspace      = true
+repository.workspace   = true
+rust-version.workspace = true
+
+[[bin]]
+name = "gfs"
+path = "src/main.rs"
+
+[dependencies]
+gfs-domain = { workspace = true }
+gfs-compute-docker        = { workspace = true }
+gfs-mcp            = { workspace = true }
+chrono             = { workspace = true }
+clap               = { workspace = true }
+tokio              = { workspace = true }
+anyhow             = { workspace = true }
+tracing            = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde_json         = { workspace = true }
+rmcp               = { workspace = true }
+axum               = { version = "0.7", features = ["json", "macros"] }
+tokio-util         = "0.7"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+gfs-storage-apfs = { workspace = true }

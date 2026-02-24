@@ -1,0 +1,31 @@
+[package]
+name               = "gfs-mcp"
+version.workspace   = true
+edition.workspace   = true
+authors.workspace   = true
+license.workspace   = true
+repository.workspace = true
+rust-version.workspace = true
+description        = "MCP server exposing GFS/data-plane tools (list_providers, status, commit, log, checkout, init, compute)"
+
+[[bin]]
+name = "gfs-mcp"
+path = "src/main.rs"
+
+[dependencies]
+rmcp = { workspace = true }
+gfs-domain = { workspace = true }
+gfs-compute-docker = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+axum = { version = "0.7", features = ["json", "macros"] }
+tokio-util = "0.7"
+atty = "0.2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+gfs-storage-apfs = { workspace = true }

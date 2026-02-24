@@ -1,0 +1,116 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version_type:
+        description: 'Version bump type'
+        required: true
+        default: 'patch'
+        type: choice
+        options:
+          - major
+          - minor
+          - patch
+
+jobs:
+  create-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo index
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-git-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo build
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Verify build
+        run: cargo build --verbose --release
+
+      - name: Run tests
+        run: cargo test --verbose
+
+      - name: Get current version
+        id: current_version
+        run: |
+          VERSION=$(grep '^version' Cargo.toml | head -n 1 | sed 's/.*"\([^"]*\)".*/\1/')
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Calculate new version
+        id: new_version
+        run: |
+          CURRENT=${{ steps.current_version.outputs.version }}
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
+
+          case "${{ github.event.inputs.version_type }}" in
+            major)
+              MAJOR=$((MAJOR + 1))
+              MINOR=0
+              PATCH=0
+              ;;
+            minor)
+              MINOR=$((MINOR + 1))
+              PATCH=0
+              ;;
+            patch)
+              PATCH=$((PATCH + 1))
+              ;;
+          esac
+
+          NEW_VERSION="$MAJOR.$MINOR.$PATCH"
+          echo "version=$NEW_VERSION" >> $GITHUB_OUTPUT
+
+      - name: Update Cargo.toml
+        run: |
+          sed -i 's/^version = .*/version = "${{ steps.new_version.outputs.version }}"/' Cargo.toml
+
+      - name: Verify update
+        run: |
+          grep '^version' Cargo.toml | head -n 1
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml
+          git commit -m "chore: bump version to ${{ steps.new_version.outputs.version }}"
+          git push origin main
+
+      - name: Create tag
+        run: |
+          git tag -a "v${{ steps.new_version.outputs.version }}" -m "Release ${{ steps.new_version.outputs.version }}"
+          git push origin "v${{ steps.new_version.outputs.version }}"
+
+      - name: Create GitHub Release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: v${{ steps.new_version.outputs.version }}
+          release_name: Release ${{ steps.new_version.outputs.version }}
+          body: |
+            ## Release ${{ steps.new_version.outputs.version }}
+
+            Binaries for this release are available below.
+          draft: false
+          prerelease: false

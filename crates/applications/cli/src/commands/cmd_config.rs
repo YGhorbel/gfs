@@ -1,0 +1,84 @@
+//! `gfs config` — get or set repo-local config (user.name, user.email).
+//!
+//! Values are stored in `.gfs/config.toml` and used as default author for commits.
+
+use std::path::PathBuf;
+
+use anyhow::Result;
+use gfs_domain::model::config::GfsConfig;
+use gfs_domain::model::errors::RepoError;
+use gfs_domain::model::layout::GFS_DIR;
+use gfs_domain::repo_utils::repo_layout;
+
+use crate::cli_utils::get_repo_dir;
+
+/// Supported config keys (git-style: user.name, user.email).
+const KEY_USER_NAME: &str = "user.name";
+const KEY_USER_EMAIL: &str = "user.email";
+
+/// Run `gfs config [--path <dir>] <key> [<value>]`.
+/// - One argument (key): get; print value or nothing, exit 0.
+/// - Two arguments (key, value): set; update .gfs/config.toml, no output on success.
+pub fn run(path: Option<PathBuf>, key: String, value: Option<String>) -> Result<()> {
+    let repo_path = path.unwrap_or_else(get_repo_dir);
+
+    match value {
+        None => get(&repo_path, &key),
+        Some(v) => set(&repo_path, &key, &v),
+    }
+}
+
+fn get(repo_path: &std::path::Path, key: &str) -> Result<()> {
+    let config = match GfsConfig::load(repo_path) {
+        Ok(c) => c,
+        Err(e) => {
+            return Err(repo_error_to_anyhow(e, repo_path));
+        }
+    };
+
+    let out = match key {
+        KEY_USER_NAME => config.user.as_ref().and_then(|u| u.name.as_deref()).unwrap_or(""),
+        KEY_USER_EMAIL => config.user.as_ref().and_then(|u| u.email.as_deref()).unwrap_or(""),
+        _ => {
+            anyhow::bail!("unsupported config key '{}'; supported: {}, {}", key, KEY_USER_NAME, KEY_USER_EMAIL);
+        }
+    };
+
+    if !out.is_empty() {
+        print!("{out}");
+    }
+    Ok(())
+}
+
+fn set(repo_path: &std::path::Path, key: &str, value: &str) -> Result<()> {
+    if key != KEY_USER_NAME && key != KEY_USER_EMAIL {
+        anyhow::bail!("unsupported config key '{}'; supported: {}, {}", key, KEY_USER_NAME, KEY_USER_EMAIL);
+    }
+
+    let gfs_dir = repo_path.join(GFS_DIR);
+    if !gfs_dir.exists() {
+        repo_layout::init_repo_layout(repo_path, None).map_err(|e| repo_error_to_anyhow(e, repo_path))?;
+    }
+
+    let mut config = GfsConfig::load(repo_path).map_err(|e| repo_error_to_anyhow(e, repo_path))?;
+
+    let mut user = config.user.clone().unwrap_or_default();
+    match key {
+        KEY_USER_NAME => user.name = Some(value.to_string()),
+        KEY_USER_EMAIL => user.email = Some(value.to_string()),
+        _ => unreachable!(),
+    }
+    config.user = Some(user);
+    config.save(repo_path).map_err(|e| repo_error_to_anyhow(e, repo_path))?;
+
+    Ok(())
+}
+
+fn repo_error_to_anyhow(e: RepoError, repo_path: &std::path::Path) -> anyhow::Error {
+    match &e {
+        RepoError::NoRepoFound(_) | RepoError::MissingFile(_) | RepoError::IoError(_) => {
+            anyhow::anyhow!("not a gfs repository: {}", repo_path.display())
+        }
+        _ => anyhow::anyhow!("{}", e),
+    }
+}
