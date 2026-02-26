@@ -547,7 +547,7 @@ The GFS repository has successfully met all critical requirements for open sourc
 
 - **Project Website:** https://guepard.run
 - **GitHub:** https://github.com/Guepard-Corp/gfs
-- **Discord:** https://discord.gg/nCXAsUd3hm
+- **Discord:** https://discord.gg/SEdZuJbc5V
 - **Email:** team@guepard.run
 - **Security:** security@guepard.run
 

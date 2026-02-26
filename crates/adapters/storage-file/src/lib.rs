@@ -744,15 +744,20 @@ fn drive_letter(path: &str) -> String {
 mod tests {
     use super::*;
     use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     fn tempdir() -> PathBuf {
         let mut p = std::env::temp_dir();
+        let counter = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
         p.push(format!(
-            "gfs-storage-test-{}",
+            "gfs-storage-test-{}-{}",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
-                .as_nanos()
+                .as_nanos(),
+            counter
         ));
         fs::create_dir_all(&p).unwrap();
         p

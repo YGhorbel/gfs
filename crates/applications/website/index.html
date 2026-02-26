@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="GFS - Git For database Systems. Version control for your databases.">
+    <meta name="keywords" content="database, version control, git, postgresql, mysql, docker">
+    <meta name="author" content="Guepard Corp">
+
+    <!-- Open Graph / Facebook -->
+    <meta property="og:type" content="website">
+    <meta property="og:url" content="https://gfs.guepard.run/">
+    <meta property="og:title" content="GFS - Git For database Systems">
+    <meta property="og:description" content="Git-like version control for your databases. Commit, branch, merge, and time travel through your database history.">
+
+    <!-- Twitter -->
+    <meta property="twitter:card" content="summary_large_image">
+    <meta property="twitter:url" content="https://gfs.guepard.run/">
+    <meta property="twitter:title" content="GFS - Git For database Systems">
+    <meta property="twitter:description" content="Git-like version control for your databases. Commit, branch, merge, and time travel through your database history.">
+
+    <title>GFS - Git For database Systems</title>
+
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600&display=swap" rel="stylesheet">
+
+    <link data-trunk rel="rust" data-bin="gfs-website">
+    <link data-trunk rel="css" href="style/main.css">
+    <link data-trunk rel="copy-dir" href="public">
+    <link data-trunk rel="copy-file" href="install">
+    <link data-trunk rel="copy-file" href="_headers">
+</head>
+<body>
+    <noscript>
+        <p style="padding: 2rem; text-align: center; color: #ffcb51;">
+            This website requires JavaScript to run. Please enable JavaScript in your browser.
+        </p>
+    </noscript>
+    <script>
+        // Handle copy button clicks
+        document.addEventListener('click', function(e) {
+            const button = e.target.closest('.copy-button');
+            if (button) {
+                const code = button.getAttribute('data-code');
+                if (code && navigator.clipboard && navigator.clipboard.writeText) {
+                    navigator.clipboard.writeText(code).then(() => {
+                        // Add copied class
+                        button.classList.add('copied');
+
+                        // Remove after 2 seconds
+                        setTimeout(() => {
+                            button.classList.remove('copied');
+                        }, 2000);
+                    }).catch(err => {
+                        console.error('Failed to copy:', err);
+                    });
+                }
+            }
+        });
+    </script>
+</body>
+</html>

@@ -7,7 +7,7 @@
     <a href="https://youtu.be/WlOkLnoY2h8?si=hb6-7kLhlOvVL1u6">
         <img src="https://img.shields.io/badge/Watch-YouTube-%23ffcb51?logo=youtube&logoColor=black" alt="Watch on YouTube" />
     </a>
-    <a href="https://discord.gg/nCXAsUd3hm">
+    <a href="https://discord.gg/SEdZuJbc5V">
         <img src="https://img.shields.io/badge/Join-Community-%23ffcb51?logo=discord&logoColor=black" alt="Join our Community" />
     </a>
     <a href="https://github.com/Guepard-Corp/gfs/actions/workflows/main.yml" target="_blank">
@@ -469,11 +469,11 @@ Please see our [CONTRIBUTING.md](CONTRIBUTING.md) for detailed guidelines on:
 - Good first issues to get started
 - Development best practices
 
-For quick questions, join our [Discord community](https://discord.gg/nCXAsUd3hm).
+For quick questions, join our [Discord community](https://discord.gg/SEdZuJbc5V).
 
 ## Community
 
-- **Discord**: [Join our community](https://discord.gg/nCXAsUd3hm)
+- **Discord**: [Join our community](https://discord.gg/SEdZuJbc5V)
 - **YouTube**: [Watch the demo](https://youtu.be/WlOkLnoY2h8?si=hb6-7kLhlOvVL1u6)
 - **Issues**: [Report bugs or request features](https://github.com/Guepard-Corp/gfs/issues)
 

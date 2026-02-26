@@ -57,7 +57,7 @@ We value community input! Here's how you can help shape GFS's future:
 3. **🐛 Report Bugs**: Help us improve by reporting issues
 4. **✨ Request Features**: Submit feature requests with use cases
 5. **🤝 Contribute**: Submit PRs for features you'd like to see
-6. **💬 Chat with Us**: Join our [Discord community](https://discord.gg/nCXAsUd3hm)
+6. **💬 Chat with Us**: Join our [Discord community](https://discord.gg/SEdZuJbc5V)
 
 ---
 
