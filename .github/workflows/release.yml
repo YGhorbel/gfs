@@ -188,11 +188,11 @@ jobs:
 
       - name: Build binaries (native)
         if: matrix.use_cross != 'true'
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --release --target ${{ matrix.target }} -p gfs-cli
 
       - name: Build binaries (cross)
         if: matrix.use_cross == 'true'
-        run: cross build --release --target ${{ matrix.target }}
+        run: cross build --release --target ${{ matrix.target }} -p gfs-cli
 
       - name: Package binaries
         run: |

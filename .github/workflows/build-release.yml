@@ -81,11 +81,11 @@ jobs:
 
       - name: Build (native)
         if: matrix.target != 'aarch64-unknown-linux-gnu'
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --release --target ${{ matrix.target }} -p gfs-cli
 
       - name: Build (cross - Linux ARM64)
         if: matrix.target == 'aarch64-unknown-linux-gnu'
-        run: cross build --release --target ${{ matrix.target }}
+        run: cross build --release --target ${{ matrix.target }} -p gfs-cli
 
       - name: Create archive (tar.gz for Linux)
         if: runner.os == 'Linux'
