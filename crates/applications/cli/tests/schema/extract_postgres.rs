@@ -15,7 +15,6 @@ use serial_test::serial;
 /// Extract schema from a running PostgreSQL database and verify the output.
 #[test]
 #[serial]
-#[cfg(target_os = "macos")]
 fn schema_extract_postgres() {
     with_fresh_repo(|repo_path| {
         // 1. Create table via docker exec
