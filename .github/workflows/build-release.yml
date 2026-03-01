@@ -41,6 +41,13 @@ jobs:
             artifact_name: gfs-darwin-arm64
             archive_name: gfs-darwin-arm64.zip
 
+          # Windows x86_64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            binary_name: gfs.exe
+            artifact_name: gfs-windows-x86_64
+            archive_name: gfs-windows-x86_64.tar.gz
+
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
@@ -100,13 +107,31 @@ jobs:
           cd ..
           rm -rf staging
 
-      - name: Calculate checksums
+      - name: Create archive (tar.gz for Windows)
+        if: runner.os == 'Windows'
+        shell: bash
         run: |
-          if [ "${{ runner.os }}" = "Linux" ]; then
-            sha256sum ${{ matrix.archive_name }} > ${{ matrix.archive_name }}.sha256
-          else
-            shasum -a 256 ${{ matrix.archive_name }} > ${{ matrix.archive_name }}.sha256
-          fi
+          mkdir -p staging
+          cp target/${{ matrix.target }}/release/${{ matrix.binary_name }} staging/
+          cd staging
+          tar czf ../${{ matrix.archive_name }} *
+          cd ..
+          rm -rf staging
+
+      - name: Calculate checksums (Linux)
+        if: runner.os == 'Linux'
+        run: sha256sum ${{ matrix.archive_name }} > ${{ matrix.archive_name }}.sha256
+
+      - name: Calculate checksums (macOS)
+        if: runner.os == 'macOS'
+        run: shasum -a 256 ${{ matrix.archive_name }} > ${{ matrix.archive_name }}.sha256
+
+      - name: Calculate checksums (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash -Path ${{ matrix.archive_name }} -Algorithm SHA256).Hash
+          "$hash  ${{ matrix.archive_name }}" | Out-File -Encoding ascii ${{ matrix.archive_name }}.sha256
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v7
@@ -175,6 +200,7 @@ jobs:
             - **Linux ARM64**: `gfs-linux-arm64.tar.gz`
             - **macOS x86_64**: `gfs-darwin-x64.zip`
             - **macOS ARM64**: `gfs-darwin-arm64.zip`
+            - **Windows x86_64**: `gfs-windows-x86_64.tar.gz`
 
             ### AI Tools (Cursor, Claude, OpenCode)
 

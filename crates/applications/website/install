@@ -437,11 +437,26 @@ download_and_install() {
         curl -# -L --connect-timeout 30 --max-time 600 -o "$tmp_dir/$filename" "$url"
     fi
 
+    # Verify the download is valid (not a 404 HTML page)
+    if ! gzip -t "$tmp_dir/$filename" 2>/dev/null; then
+        echo -e "${RED}Error: Download failed or returned invalid content.${NC}"
+        echo -e "${MUTED}The release may not have a binary for your platform ($combo).${NC}"
+        echo -e "${MUTED}Check: https://github.com/Guepard-Corp/gfs/releases${NC}"
+        echo -e "${MUTED}Or build from source: cargo build --release && ./install --binary target/release/gfs${NC}"
+        rm -rf "$tmp_dir"
+        exit 1
+    fi
+
     # Extract the tar.gz archive (all platforms now use tar.gz)
     tar -xzf "$tmp_dir/$filename" -C "$tmp_dir"
 
-    mv "$tmp_dir/gfs" "$INSTALL_DIR"
-    chmod 755 "${INSTALL_DIR}/gfs"
+    if [[ "$os" == "windows" ]]; then
+        mv "$tmp_dir/gfs.exe" "$INSTALL_DIR/gfs.exe"
+        chmod 755 "${INSTALL_DIR}/gfs.exe" 2>/dev/null || true
+    else
+        mv "$tmp_dir/gfs" "$INSTALL_DIR"
+        chmod 755 "${INSTALL_DIR}/gfs"
+    fi
     rm -rf "$tmp_dir"
 }
 
