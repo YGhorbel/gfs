@@ -43,6 +43,9 @@ jobs:
             archive_name: gfs-windows-x86_64.tar.gz
 
     runs-on: ${{ matrix.os }}
+    env:
+      # Embedded at compile time by option_env!() in gfs-telemetry.
+      GFS_POSTHOG_API_KEY: ${{ secrets.GFS_POSTHOG_API_KEY }}
     steps:
       - uses: actions/checkout@v6
 
