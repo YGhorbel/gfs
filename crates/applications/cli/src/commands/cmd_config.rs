@@ -19,6 +19,7 @@ use crate::cli_utils::get_repo_dir;
 /// Supported config keys (git-style: user.name, user.email).
 const KEY_USER_NAME: &str = "user.name";
 const KEY_USER_EMAIL: &str = "user.email";
+const KEY_TELEMETRY_ENABLED: &str = "telemetry.enabled";
 
 /// Run `gfs config [--global] [--path <dir>] <key> [<value>]`.
 /// - One argument (key): get; print value or nothing, exit 0.
@@ -62,12 +63,19 @@ fn get(repo_path: &std::path::Path, key: &str) -> Result<()> {
             .as_ref()
             .and_then(|u| u.email.as_deref())
             .unwrap_or(""),
+        KEY_TELEMETRY_ENABLED => {
+            anyhow::bail!(
+                "'{}' is a global-only setting; use --global to read it",
+                key
+            );
+        }
         _ => {
             anyhow::bail!(
-                "unsupported config key '{}'; supported: {}, {}",
+                "unsupported config key '{}'; supported: {}, {}, {}",
                 key,
                 KEY_USER_NAME,
-                KEY_USER_EMAIL
+                KEY_USER_EMAIL,
+                KEY_TELEMETRY_ENABLED
             );
         }
     };
@@ -79,12 +87,19 @@ fn get(repo_path: &std::path::Path, key: &str) -> Result<()> {
 }
 
 fn set(repo_path: &std::path::Path, key: &str, value: &str) -> Result<()> {
+    if key == KEY_TELEMETRY_ENABLED {
+        anyhow::bail!(
+            "'{}' is a global-only setting; use --global to set it",
+            key
+        );
+    }
     if key != KEY_USER_NAME && key != KEY_USER_EMAIL {
         anyhow::bail!(
-            "unsupported config key '{}'; supported: {}, {}",
+            "unsupported config key '{}'; supported: {}, {}, {}",
             key,
             KEY_USER_NAME,
-            KEY_USER_EMAIL
+            KEY_USER_EMAIL,
+            KEY_TELEMETRY_ENABLED
         );
     }
 
@@ -117,41 +132,71 @@ fn set(repo_path: &std::path::Path, key: &str, value: &str) -> Result<()> {
 fn get_global(key: &str) -> Result<()> {
     let settings = GlobalSettings::load().unwrap_or_default();
 
-    let out = match key {
-        KEY_USER_NAME => settings
-            .user
-            .as_ref()
-            .and_then(|u| u.name.as_deref())
-            .unwrap_or(""),
-        KEY_USER_EMAIL => settings
-            .user
-            .as_ref()
-            .and_then(|u| u.email.as_deref())
-            .unwrap_or(""),
+    match key {
+        KEY_USER_NAME => {
+            let out = settings
+                .user
+                .as_ref()
+                .and_then(|u| u.name.as_deref())
+                .unwrap_or("");
+            if !out.is_empty() {
+                print!("{out}");
+            }
+        }
+        KEY_USER_EMAIL => {
+            let out = settings
+                .user
+                .as_ref()
+                .and_then(|u| u.email.as_deref())
+                .unwrap_or("");
+            if !out.is_empty() {
+                print!("{out}");
+            }
+        }
+        KEY_TELEMETRY_ENABLED => {
+            println!("{}", settings.telemetry);
+        }
         _ => {
             anyhow::bail!(
-                "unsupported config key '{}'; supported: {}, {}",
+                "unsupported config key '{}'; supported: {}, {}, {}",
                 key,
                 KEY_USER_NAME,
-                KEY_USER_EMAIL
+                KEY_USER_EMAIL,
+                KEY_TELEMETRY_ENABLED
             );
         }
-    };
-
-    if !out.is_empty() {
-        print!("{out}");
     }
+
     Ok(())
 }
 
 fn set_global(key: &str, value: &str) -> Result<()> {
-    if key != KEY_USER_NAME && key != KEY_USER_EMAIL {
-        anyhow::bail!(
-            "unsupported config key '{}'; supported: {}, {}",
-            key,
-            KEY_USER_NAME,
-            KEY_USER_EMAIL
-        );
+    match key {
+        KEY_USER_NAME | KEY_USER_EMAIL => {}
+        KEY_TELEMETRY_ENABLED => {
+            let enabled = match value {
+                "true" => true,
+                "false" => false,
+                _ => anyhow::bail!(
+                    "invalid value '{}' for '{}'; expected 'true' or 'false'",
+                    value,
+                    key
+                ),
+            };
+            let mut settings = GlobalSettings::load().unwrap_or_default();
+            settings.telemetry = enabled;
+            settings.save().map_err(|e| anyhow::anyhow!("{}", e))?;
+            return Ok(());
+        }
+        _ => {
+            anyhow::bail!(
+                "unsupported config key '{}'; supported: {}, {}, {}",
+                key,
+                KEY_USER_NAME,
+                KEY_USER_EMAIL,
+                KEY_TELEMETRY_ENABLED
+            );
+        }
     }
 
     let mut settings = GlobalSettings::load().unwrap_or_default();

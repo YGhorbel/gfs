@@ -76,14 +76,29 @@ impl GfsConfig {
     }
 }
 
+fn default_telemetry() -> bool {
+    true
+}
+
 /// Global GFS settings stored in `~/.gfs/config.toml`.
 ///
 /// Provides system-wide defaults for user identity (name, email) that apply
 /// to every repository, similar to `~/.gitconfig`.
-#[derive(Debug, Serialize, Deserialize, Default)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct GlobalSettings {
     #[serde(default)]
     pub user: Option<UserConfig>,
+    #[serde(default = "default_telemetry")]
+    pub telemetry: bool,
+}
+
+impl Default for GlobalSettings {
+    fn default() -> Self {
+        Self {
+            user: None,
+            telemetry: true,
+        }
+    }
 }
 
 impl GlobalSettings {
@@ -208,6 +223,7 @@ mod tests {
                 name: Some("Bob".into()),
                 email: Some("bob@example.com".into()),
             }),
+            telemetry: true,
         };
         settings.save().unwrap();
 
@@ -228,6 +244,21 @@ mod tests {
         // SAFETY: single-threaded test; no other threads read HOME concurrently.
         unsafe { std::env::set_var("HOME", dir.path()) };
         assert!(GlobalSettings::load().is_none());
+    }
+
+    #[test]
+    fn global_settings_telemetry_default_true() {
+        let s = GlobalSettings::default();
+        assert!(s.telemetry, "telemetry should default to true");
+    }
+
+    #[test]
+    fn global_settings_telemetry_serde_default() {
+        // When the field is absent from TOML, it should default to true.
+        let s: GlobalSettings = toml::from_str("").unwrap();
+        assert!(s.telemetry);
+        let s2: GlobalSettings = toml::from_str("telemetry = false").unwrap();
+        assert!(!s2.telemetry);
     }
 
     #[test]

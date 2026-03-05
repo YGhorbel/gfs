@@ -8,6 +8,7 @@ mod getting_started;
 mod installation;
 mod mcp;
 mod quick_start;
+mod telemetry;
 
 use ai_agents::{AiAgentsSkills, AiAgentsSubagents};
 use commands::{
@@ -19,6 +20,7 @@ use getting_started::GettingStarted;
 use installation::Installation;
 use mcp::{McpClaudeCode, McpClaudeDesktop, McpCursor, McpHttpMode, McpOverview};
 use quick_start::QuickStart;
+use telemetry::Telemetry;
 
 #[component]
 pub fn Docs() -> impl IntoView {
@@ -85,6 +87,7 @@ pub fn Docs() -> impl IntoView {
                                     <li><A href="/docs/configuration" class="nav-item">"Configuration"</A></li>
                                     <li><A href="/docs/troubleshooting" class="nav-item">"Troubleshooting"</A></li>
                                     <li><A href="/docs/development" class="nav-item">"Development"</A></li>
+                                    <li><A href="/docs/telemetry" class="nav-item">"Telemetry"</A></li>
                                 </ul>
                             </div>
                         </nav>
@@ -113,6 +116,7 @@ pub fn Docs() -> impl IntoView {
                             "mcp/claude-code" => view! { <McpClaudeCode/> }.into_view(),
                             "mcp/cursor" => view! { <McpCursor/> }.into_view(),
                             "mcp/http-mode" => view! { <McpHttpMode/> }.into_view(),
+                            "telemetry" => view! { <Telemetry/> }.into_view(),
                             _ => view! { <ComingSoon page=page()/> }.into_view(),
                         }}
                     </article>
