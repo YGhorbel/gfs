@@ -42,6 +42,7 @@ impl DockerCompute {
         match bollard::Docker::connect_with_local_defaults() {
             Ok(docker) => Ok(Self { docker }),
             Err(default_err) => {
+                #[cfg(unix)]
                 if let Some(socket_path) = Self::podman_socket_path() {
                     let socket = socket_path.to_string_lossy();
 
@@ -68,6 +69,7 @@ impl DockerCompute {
         }
     }
 
+    #[cfg(unix)]
     fn podman_socket_path() -> Option<std::path::PathBuf> {
         let from_xdg = std::env::var_os("XDG_RUNTIME_DIR")
             .map(std::path::PathBuf::from)
