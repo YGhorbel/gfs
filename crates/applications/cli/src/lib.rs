@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use anyhow::Result;
+use clap::error::ErrorKind;
 use clap::{Parser, Subcommand};
 use gfs_domain::ports::storage::{CloneOptions, SnapshotId, SnapshotOptions, VolumeId};
 use gfs_telemetry::TelemetryClient;
@@ -420,7 +421,14 @@ where
 
     // Init color early so error messages (e.g. parse errors) can use it
     ColorMode::Auto.init();
-    let cli = Cli::try_parse_from(args_os)?;
+    let cli = match Cli::try_parse_from(args_os) {
+        Ok(c) => c,
+        Err(e) if e.kind() == ErrorKind::DisplayVersion || e.kind() == ErrorKind::DisplayHelp => {
+            e.print().expect("writing version/help to stdout/stderr");
+            return Ok(ExitCode::SUCCESS);
+        }
+        Err(e) => return Err(e.into()),
+    };
     cli.color.init();
 
     // Skip telemetry for Version and Mcp (MCP tracks its own events)
