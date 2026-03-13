@@ -2,7 +2,8 @@
 
 <div align="center">
     <h1>Git For database Systems</h1>
-    <br />  
+    <p><strong>Safe database version control for AI coding agents and developers.</strong></p>
+    <br />
     <p align="center">
     <a href="https://youtu.be/WlOkLnoY2h8?si=hb6-7kLhlOvVL1u6">
         <img src="https://img.shields.io/badge/Watch-YouTube-%23ffcb51?logo=youtube&logoColor=black" alt="Watch on YouTube" />
@@ -14,12 +15,13 @@
         <img src="https://img.shields.io/github/actions/workflow/status/Guepard-Corp/gfs/main.yml?branch=main" alt="Build">
     </a>
     <a href="https://github.com/Guepard-Corp/gfs/blob/main/LICENCE" target="_blank">
-        <img src="https://img.shields.io/badge/license-ELv2-blue.svg" alt="License" />
+        <img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License" />
     </a>
     <a href="https://github.com/Guepard-Corp/gfs/pulls" target="_blank">
         <img src="https://img.shields.io/badge/PRs-welcome-brightgreen.svg" alt="PRs Welcome" />
     </a>
     </p>
+    <p>Works with Claude Code, Cursor, Cline, Windsurf, and any skills / MCP-compatible agent</p>
     <img src="resources/GFSShowcase.gif" alt="GFS Showcase" />
 </div>
 
@@ -27,12 +29,14 @@
 
 - [Important Notice](#important-notice)
 - [What is GFS?](#what-is-gfs)
+- [Built for AI Agents](#built-for-ai-agents)
 - [Supported Databases](#supported-databases)
 - [Features](#features)
 - [Installation](#installation)
 - [Quick Start](#quick-start)
-- [Command Reference](#command-reference)
+- [AI Agent Setup](#ai-agent-setup)
 - [MCP Server](#mcp-server)
+- [Command Reference](#command-reference)
 - [Configuration](#configuration)
 - [Troubleshooting](#troubleshooting)
 - [Development](#development)
@@ -43,19 +47,35 @@
 
 ## Important Notice
 
-🚧 This project is under active development and not yet suitable for production use. Expect breaking changes, incomplete features, and evolving APIs.
+This project is under active development and not yet suitable for production use. Expect breaking changes, incomplete features, and evolving APIs.
 
 ## What is GFS?
 
 GFS (Git For database Systems) brings Git-like version control to your databases. It enables you to:
 
-- **Commit** database states with meaningful messages
-- **Branch** and **merge** database schemas and data
+- **Safe for AI agents** — automatic snapshots protect against agent mistakes and data loss
+- **Rollback instantly** — undo any database change in seconds
+- **Branch** to let agents and developers experiment without risking data
 - **Time travel** through your database history
-- **Collaborate** on database changes with confidence
-- **Rollback** to any previous state instantly
+- **Commit** database states with meaningful messages
+- **Collaborate** — agents and humans working on the same database with confidence
 
 GFS uses Docker to manage isolated database environments, making it easy to work with different versions of your database without conflicts.
+
+## Built for AI Agents
+
+AI coding agents are powerful but dangerous around databases. A single bad migration, a dropped table, or corrupted data can be costly to recover from — if recovery is even possible.
+
+GFS makes agent-driven database work safe by default:
+
+- **Every change is a commit.** If an agent makes a mistake, roll back in one command.
+- **Branches are free.** Let agents experiment on an isolated branch — merge only what works.
+- **MCP integration.** Agents interact with GFS natively through the Model Context Protocol, no shell wrappers needed.
+- **Less token waste.** Import, export, and query operations run through GFS instead of the agent generating boilerplate SQL.
+
+**Without GFS:** an agent drops a table or runs a bad migration — you're left manually restoring from backups (if they exist).
+
+**With GFS:** `gfs checkout HEAD~1` — done. Your database is back to the previous state in seconds.
 
 ## Supported Databases
 
@@ -66,17 +86,17 @@ Run `gfs providers` to see all available providers and their supported versions.
 
 ## Features
 
-- ✅ Initialize database repositories
-- ✅ Commit database changes
-- ✅ View commit history
-- ✅ Checkout previous commits
-- ✅ Create and switch branches
-- ✅ Check database status
-- ✅ Query database directly from CLI (SQL execution and interactive mode)
-- ✅ Schema extraction, show, and diff between commits
-- ✅ Export and import data (SQL, custom, CSV)
-- ✅ Compute container management (start, stop, logs)
-- ✅ Repository config (user.name, user.email)
+- Initialize database repositories
+- Commit database changes
+- View commit history
+- Checkout previous commits
+- Create and switch branches
+- Check database status
+- Query database directly from CLI (SQL execution and interactive mode)
+- Schema extraction, show, and diff between commits
+- Export and import data (SQL, custom, CSV)
+- Compute container management (start, stop, logs)
+- Repository config (user.name, user.email)
 
 ## Installation
 
@@ -129,25 +149,11 @@ gfs query
 
 ### 6. Make changes and commit
 
-[Example] Create table users
-
 ```bash
 gfs query "CREATE TABLE users (id SERIAL PRIMARY KEY, name TEXT NOT NULL);"
-```
-
-[Example] Add data to users
-
-```bash
 gfs query "INSERT INTO users (name) VALUES ('Alice'), ('Bob');"
+gfs commit -m "Add users table"
 ```
-
-After modifying your database schema or data:
-
-```bash
-gfs commit -m "my first commit"
-```
-
-Output: `[main] 88b0ff8  my first commit`
 
 ### 7. View commit history
 
@@ -155,61 +161,108 @@ Output: `[main] 88b0ff8  my first commit`
 gfs log
 ```
 
-### 8. Update the schema
-
-[Example] Add `transactions` table with foreign key to `users`:
-
-```bash
-gfs query "CREATE TABLE transactions (id SERIAL PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id), amount NUMERIC NOT NULL, created_at TIMESTAMP DEFAULT NOW());"
-```
-
-[Example] Add data to `transactions`:
-
-```bash
-gfs query "INSERT INTO transactions (user_id, amount) VALUES (1, 100.50), (2, 25.00);"
-```
-
-```bash
-gfs commit -m "my second commit"
-```
-
-### 8. Make more changes
-
-Use `gfs query` to run SQL or open an interactive session, then commit:
-
-```bash
-gfs query "ALTER TABLE users ADD COLUMN email TEXT;"
-gfs commit -m "my third commit"
-```
-
-### 9. Time travel through history
-
-View the log again:
-
-```bash
-gfs log
-```
-
-Checkout a previous commit:
+### 8. Time travel through history
 
 ```bash
 gfs checkout <commit_hash>
 ```
 
-Your database will be restored to that exact state!
+Your database will be restored to that exact state.
 
-### 10. Work with branches
-
-Create a new branch:
+### 9. Work with branches
 
 ```bash
-gfs checkout -b release
+gfs checkout -b feature-branch   # Create and switch to a new branch
+gfs checkout main                # Switch back to main
 ```
 
-Switch back to main:
+## AI Agent Setup
+
+Connect your AI agent to GFS in under a minute.
+
+### Claude Code
+
+GFS works with Claude Code out of the box via MCP:
 
 ```bash
-gfs checkout main
+claude mcp add gfs -- gfs mcp --path /path/to/your/repo
+```
+
+### Claude Desktop
+
+Add to your Claude Desktop configuration (`claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "gfs": {
+      "command": "gfs",
+      "args": ["mcp", "--path", "/path/to/your/repo"]
+    }
+  }
+}
+```
+
+Restart Claude Desktop and GFS operations will be available as tools.
+
+### Cursor / Cline / Windsurf
+
+Use the stdio MCP server:
+
+```bash
+gfs mcp --path /path/to/your/repo
+```
+
+Configure your editor's MCP settings to point to this command. Refer to your editor's MCP documentation for the exact configuration format.
+
+### What agents can do with GFS
+
+Once connected, your AI agent can:
+
+- **Commit** before and after making changes — creating safe checkpoints
+- **Branch** to try risky migrations without affecting the main database
+- **Roll back** if something goes wrong
+- **Query** the database to inspect data
+- **Diff schemas** between commits to understand what changed
+- **Import/export** data without generating large SQL blocks in context
+
+## MCP Server
+
+GFS includes a Model Context Protocol (MCP) server for programmatic access to all GFS operations.
+
+### Stdio mode (default)
+
+```bash
+gfs mcp
+# or explicitly
+gfs mcp stdio
+```
+
+Designed for direct integration with MCP-compatible clients.
+
+### HTTP mode
+
+```bash
+# Start as a background daemon
+gfs mcp start
+
+# Check daemon status
+gfs mcp status
+
+# Stop the daemon
+gfs mcp stop
+
+# Start in foreground (default port: 3000)
+gfs mcp web
+
+# Custom port
+gfs mcp web --port 8080
+```
+
+### Specifying a Repository Path
+
+```bash
+gfs mcp --path /path/to/repo
 ```
 
 ## Command Reference
@@ -237,41 +290,9 @@ gfs schema show main~3                # View schema from 3 commits back
 List available database providers and their supported versions.
 
 ```bash
-# List all providers
 gfs providers
-
-# Show details for a specific provider
-gfs providers postgres
+gfs providers postgres    # Show details for a specific provider
 ```
-
-**Example output:**
-
-```
-  database_provider    | version                        | features
-  ---------------------+--------------------------------+---------------------------------------------------
-  mysql                | 8.0, 8.1                       | tls, schema, masking, backup, import
-  postgres             | 13, 14, 15, 16, 17, 18         | tls, schema, masking, auto-scaling, performance...
-
-  Images are pulled from Docker Hub by default.
-```
-
-For provider details (e.g. `gfs providers postgres`):
-
-```
-  Provider: postgres
-
-  Supported versions: 13, 14, 15, 16, 17, 18
-
-  Features
-  ─────────────────────────────────────────────────────────────────────────────────────
-  feature                   | description
-  --------------------------+--------------------------------------------------------
-  tls                       | TLS/SSL encryption for connections.
-  schema                    | Schema and DDL management.
-  ...
-```
-
-Use this command to check available providers before initializing a repository.
 
 ### `gfs init`
 
@@ -281,36 +302,13 @@ Initialize a new GFS repository.
 gfs init --database-provider <provider> --database-version <version>
 ```
 
-**Options:**
-- `--database-provider`: Database type (supports `postgres`, `mysql`)
-- `--database-version`: Database version (e.g., `17` for postgres, `8.0` for mysql)
-
 ### `gfs status`
 
 Show the current state of storage and compute resources.
 
 ```bash
 gfs status
-# Or JSON output:
 gfs status --output json
-```
-
-**Example output:**
-
-```
-  Repository
-  ────────────────────────────────────────
-  Branch               main
-  Active workspace     .gfs/workspaces/main/0/data
-
-  Compute
-  ────────────────────────────────────────
-  Provider             postgres
-  Version              17
-  Status               ● running
-  Container ID         37f65464d421…
-  Container data dir   .gfs/workspaces/main/0/data
-  Connection           postgresql://postgres:postgres@localhost:55251/postgres
 ```
 
 ### `gfs commit`
@@ -321,33 +319,14 @@ Commit the current database state.
 gfs commit -m "commit message"
 ```
 
-**Example output:**
-
-```
-[main] 88b0ff8  Add users table
-```
-
-**Options:**
-- `-m, --message`: Commit message describing the changes
-
 ### `gfs log`
 
 Show the commit history.
 
 ```bash
 gfs log
-gfs log -n 10                    # Limit to 10 commits
-gfs log --full-hash              # Show full 64-char hashes
-```
-
-**Example output:**
-
-```
-commit 88b0ff8 (HEAD -> main, main)
-Author: user
-Date:   Sun Mar  1 12:56:43 2026 +0000
-
-    Add users table
+gfs log -n 10              # Limit to 10 commits
+gfs log --full-hash         # Show full 64-char hashes
 ```
 
 ### `gfs checkout`
@@ -355,200 +334,71 @@ Date:   Sun Mar  1 12:56:43 2026 +0000
 Switch to a different commit or branch.
 
 ```bash
-# Checkout a specific commit
-gfs checkout <commit_hash>
-
-# Create and checkout a new branch
-gfs checkout -b <branch_name>
-
-# Checkout an existing branch
-gfs checkout <branch_name>
+gfs checkout <commit_hash>       # Checkout a specific commit
+gfs checkout -b <branch_name>   # Create and checkout a new branch
+gfs checkout <branch_name>      # Checkout an existing branch
 ```
-
-**Example output:**
-
-```
-Switched to new branch 'feature-test' (88b0ff8)
-Switched to main (88b0ff8)
-```
-
-**Options:**
-- `-b`: Create a new branch
 
 ### `gfs query`
 
 Execute SQL queries or open an interactive database terminal.
 
 ```bash
-# Execute a SQL query
-gfs query "SELECT * FROM users WHERE id = 1"
-
-# Open interactive terminal (omit the query)
-gfs query
+gfs query "SELECT * FROM users"   # Execute a query
+gfs query                         # Open interactive terminal
 ```
 
-**Example output (for `gfs query "SELECT 1"`):**
-
-```
- ?column?
-----------
-        1
-(1 row)
-```
-
-**Options:**
-- `--database`: Override the default database name
-- `--path`: Path to the GFS repository root
+Options: `--database`, `--path`
 
 ### `gfs schema`
 
 Database schema operations: extract, show, and diff.
 
 ```bash
-# Extract schema from the running database
 gfs schema extract [--output <file>] [--compact]
-
-# Show schema from a specific commit
 gfs schema show <commit> [--metadata-only] [--ddl-only]
-
-# Compare schemas between two commits
 gfs schema diff <commit1> <commit2> [--pretty] [--json]
 ```
 
-**Options:**
-- `extract`: Schema from the running database (JSON output)
-- `show`: Schema from a historical commit
-- `diff`: Compare two commits (agentic format by default; `--pretty` for human-readable; `--json` for structured output)
-
 ### `gfs export`
 
-Export data from the running database to a file.
+Export data from the running database.
 
 ```bash
 gfs export --output-dir <dir> --format <fmt>
 ```
 
-**Options:**
-- `--output-dir`: Directory where the export file will be written
-- `--format`: Export format (`sql` for plain-text SQL, `custom` for PostgreSQL binary dump)
+Formats: `sql` (plain-text SQL), `custom` (PostgreSQL binary dump)
 
 ### `gfs import`
 
-Import data from a file into the running database.
+Import data into the running database.
 
 ```bash
 gfs import --file <path> [--format <fmt>]
 ```
 
-**Options:**
-- `--file`: Path to the dump file (`.sql`, `.dump`, or `.csv`)
-- `--format`: Import format (inferred from file extension when omitted)
+Supports `.sql`, `.dump`, and `.csv` files. Format is inferred from file extension when omitted.
 
 ### `gfs config`
 
-Read or write repository config (e.g. `user.name`, `user.email`).
+Read or write repository config.
 
 ```bash
-# Read a config value
-gfs config user.name
-
-# Set a config value
-gfs config user.name "John Doe"
+gfs config user.name              # Read
+gfs config user.name "John Doe"   # Write
 ```
 
 ### `gfs compute`
 
-Manage the database container (start, stop, status, logs).
+Manage the database container.
 
 ```bash
-gfs compute start    # Start the container
-gfs compute stop     # Stop the container
-gfs compute status   # Show container status
-gfs compute logs     # View container logs (--tail, --since options)
+gfs compute start     # Start the container
+gfs compute stop      # Stop the container
+gfs compute status    # Show container status
+gfs compute logs      # View container logs
 ```
-
-## MCP Server
-
-GFS includes a Model Context Protocol (MCP) server that allows AI assistants and other tools to interact with your GFS repositories programmatically. The MCP server provides a standardized interface for database version control operations.
-
-### Starting the MCP Server
-
-**Stdio mode (default):**
-
-```bash
-# Start MCP server with stdio transport (for direct client use)
-gfs mcp
-# or explicitly
-gfs mcp stdio
-```
-
-This mode is designed for direct integration with MCP-compatible clients like Claude Desktop, Cline, or other AI tools.
-
-**HTTP mode (daemon):**
-
-```bash
-# Start as a background daemon with HTTP transport
-gfs mcp start
-
-# Check daemon status
-gfs mcp status
-
-# Stop the daemon
-gfs mcp stop
-
-# Restart the daemon
-gfs mcp restart
-```
-
-**HTTP mode (foreground):**
-
-```bash
-# Start with HTTP transport in foreground (default port: 3000)
-gfs mcp web
-
-# Specify a custom port
-gfs mcp web --port 8080
-```
-
-### Specifying a Repository Path
-
-```bash
-# Use a specific repository
-gfs mcp --path /path/to/repo
-
-# Start daemon for a specific repository
-gfs mcp --path /path/to/repo start
-```
-
-### MCP Version
-
-```bash
-gfs mcp version
-```
-
-### Use Cases
-
-- **AI Assistants**: Integrate with Claude Desktop or other AI tools for automated database version control
-- **CI/CD Integration**: Use the HTTP API in automated pipelines
-- **Custom Tools**: Build custom tooling on top of the MCP interface
-- **Remote Management**: Control GFS repositories from remote systems
-
-### Claude Desktop Integration
-
-To use GFS with Claude Desktop, add the following to your Claude Desktop configuration:
-
-```json
-{
-  "mcpServers": {
-    "gfs": {
-      "command": "gfs",
-      "args": ["mcp", "--path", "/path/to/your/repo"]
-    }
-  }
-}
-```
-
-Then restart Claude Desktop and GFS operations will be available as tools.
 
 ## Configuration
 
@@ -565,8 +415,6 @@ GFS uses Docker to manage database containers. Make sure Docker is installed and
 
 ### Docker not running
 
-If you get an error about Docker not being available:
-
 ```bash
 # Start Docker Desktop or Docker daemon
 # On macOS/Windows: Start Docker Desktop
@@ -575,16 +423,9 @@ If you get an error about Docker not being available:
 
 ### Port conflicts
 
-If the default port (5432 for PostgreSQL) is already in use:
-
-```bash
-# Stop the conflicting service or configure GFS to use a different port
-# (Port configuration coming in future releases)
-```
+If the default port is already in use, stop the conflicting service or check `gfs status` for the assigned port.
 
 ### Connection issues
-
-If you can't connect to the database:
 
 1. Check that the container is running: `docker ps`
 2. Verify the connection details with: `gfs status`
@@ -600,64 +441,30 @@ If you can't connect to the database:
 
 ### Running locally
 
-Clone the repository:
-
 ```bash
 git clone https://github.com/Guepard-Corp/gfs.git
 cd gfs
-```
-
-Build the project:
-
-```bash
 cargo build
 ```
 
 Run commands using cargo:
 
 ```bash
-# Initialize a repository
 cargo run --bin gfs init --database-provider postgres --database-version 17
-
-# Commit changes
 cargo run --bin gfs commit -m "v1"
-
-# View history
 cargo run --bin gfs log
-
-# Check status
 cargo run --bin gfs status
 ```
 
 ### Testing
 
-Run all tests:
-
 ```bash
-cargo test
-```
-
-On macOS, the full suite (including E2E checkout tests) requires sequential execution. Use either:
-
-```bash
-cargo test-all
-# or
-RUST_TEST_THREADS=1 cargo test
-
-#or generate coverage report
-cargo cov
-```
-
-Run specific tests:
-
-```bash
-cargo test <test_name>
-```
-
-Run tests with output:
-
-```bash
-cargo test -- --nocapture
+cargo test                        # Run all tests
+cargo test-all                    # Full suite including E2E (sequential)
+RUST_TEST_THREADS=1 cargo test    # Alternative sequential execution
+cargo cov                         # Generate coverage report
+cargo test <test_name>            # Run specific tests
+cargo test -- --nocapture         # Run with output
 ```
 
 **Optional: Better test reports and code coverage**
@@ -697,14 +504,10 @@ Check [Roadmap](ROADMAP.md)
 
 ## License
 
-This project is licensed under the Elastic License v2 (ELv2). See the [LICENSE](LICENCE) file for details.
-
-## Acknowledgments
-
-GFS is inspired by Git's approach to version control and extends these concepts to database management. Special thanks to all contributors and the open-source community.
+This project is licensed under MIT License. See the [LICENSE](LICENCE) file for details.
 
 ---
 
 <div align="center">
-Made with ❤️ by the Guepard team
+Made with love by the Guepard team
 </div>
