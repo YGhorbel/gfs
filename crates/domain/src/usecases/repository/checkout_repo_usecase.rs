@@ -191,6 +191,8 @@ impl<R: DatabaseProviderRegistry> CheckoutRepoUseCase<R> {
         if !paths_differ(&active_str, current_bind.as_deref().unwrap_or("")) {
             tracing::info!("ensure_compute_started_after_checkout: starting existing container");
             let _ = self.compute.start(instance_id, Default::default()).await?;
+            // Wait for database to be ready
+            self.wait_for_database_ready(instance_id, &provider).await?;
             return Ok(());
         }
 
@@ -200,6 +202,9 @@ impl<R: DatabaseProviderRegistry> CheckoutRepoUseCase<R> {
         self.compute.remove_instance(instance_id).await?;
         let new_id = self.compute.provision(&definition).await?;
         let _ = self.compute.start(&new_id, Default::default()).await?;
+
+        // Wait for database to be ready before returning
+        self.wait_for_database_ready(&new_id, &provider).await?;
         self.repository
             .update_runtime_config(
                 path,
@@ -210,6 +215,89 @@ impl<R: DatabaseProviderRegistry> CheckoutRepoUseCase<R> {
                 },
             )
             .await?;
+        Ok(())
+    }
+
+    /// Wait for the database to be ready to accept connections.
+    /// Polls the database with a simple query until it responds or timeout is reached.
+    async fn wait_for_database_ready(
+        &self,
+        instance_id: &InstanceId,
+        provider: &Arc<dyn crate::ports::database_provider::DatabaseProvider>,
+    ) -> std::result::Result<(), CheckoutRepoError> {
+        use std::time::{Duration, Instant};
+        use tokio::time::sleep;
+
+        let max_wait = Duration::from_secs(30);
+        let check_interval = Duration::from_millis(500);
+        let start = Instant::now();
+
+        // Get connection info to build test command
+        let conn_info = self
+            .compute
+            .get_connection_info(instance_id, provider.default_port())
+            .await?;
+
+        let params = crate::ports::database_provider::ConnectionParams {
+            host: conn_info.host,
+            port: conn_info.port,
+            env: conn_info.env,
+        };
+
+        // Build readiness test command based on provider
+        let test_command = match provider.name() {
+            "postgres" | "postgresql" => {
+                let user = params.get_env("POSTGRES_USER").unwrap_or("postgres");
+                let password = params.get_env("POSTGRES_PASSWORD").unwrap_or("postgres");
+                let db = params.get_env("POSTGRES_DB").unwrap_or("postgres");
+                format!(
+                    "PGPASSWORD=\"{}\" psql -h 127.0.0.1 -U \"{}\" -d \"{}\" -c \"SELECT 1;\"",
+                    password, user, db
+                )
+            }
+            "mysql" => {
+                let password = params.get_env("MYSQL_ROOT_PASSWORD").unwrap_or("root");
+                format!(
+                    "mysql -h 127.0.0.1 -u root -p\"{}\" -e \"SELECT 1;\"",
+                    password
+                )
+            }
+            _ => {
+                // For unknown providers, skip readiness check
+                tracing::debug!(
+                    "Skipping readiness check for unknown provider: {}",
+                    provider.name()
+                );
+                return Ok(());
+            }
+        };
+
+        // Poll until database is ready or timeout
+        while start.elapsed() < max_wait {
+            match self
+                .compute
+                .prepare_for_snapshot(instance_id, std::slice::from_ref(&test_command))
+                .await
+            {
+                Ok(_) => {
+                    tracing::debug!("Database is ready after {:?}", start.elapsed());
+                    return Ok(());
+                }
+                Err(_) => {
+                    // Database not ready yet, continue polling
+                    sleep(check_interval).await;
+                    continue;
+                }
+            }
+        }
+
+        // Timeout reached
+        tracing::warn!(
+            "Database did not become ready within {:?} seconds",
+            max_wait.as_secs()
+        );
+        // Don't fail checkout - database may still start eventually
+        // This is a best-effort check
         Ok(())
     }
 }

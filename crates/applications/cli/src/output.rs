@@ -79,3 +79,44 @@ pub fn bold(s: impl AsRef<str>) -> String {
     let s = s.as_ref().to_string();
     format!("{}", s.if_supports_color(Stream::Stdout, |t| t.bold()))
 }
+
+// ---------------------------------------------------------------------------
+// Safe stdout printing (handles broken pipe gracefully)
+// ---------------------------------------------------------------------------
+
+use std::io::{self, Write};
+
+/// Print a line to stdout, handling broken pipe errors gracefully.
+/// This is useful when output is piped to commands like `head` or `grep`
+/// that may close stdout early.
+pub fn println_safe(args: std::fmt::Arguments) -> io::Result<()> {
+    match writeln!(io::stdout(), "{}", args) {
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::BrokenPipe => {
+            // Gracefully handle broken pipe (common when piping)
+            Ok(())
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Macro for safe println that handles broken pipe errors.
+/// Usage: println_safe!("format", args...) or println_safe!() for empty line
+#[macro_export]
+macro_rules! println_safe {
+    () => {
+        if let Err(e) = std::io::Write::write_all(&mut std::io::stdout(), b"\n") {
+            if e.kind() != std::io::ErrorKind::BrokenPipe {
+                return Err(std::io::Error::from(e).into());
+            }
+        }
+    };
+    ($($arg:tt)*) => {
+        if let Err(e) = $crate::output::println_safe(format_args!($($arg)*)) {
+            // Only propagate non-broken-pipe errors
+            if e.kind() != std::io::ErrorKind::BrokenPipe {
+                return Err(std::io::Error::from(e).into());
+            }
+        }
+    };
+}

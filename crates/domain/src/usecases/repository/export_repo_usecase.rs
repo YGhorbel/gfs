@@ -121,7 +121,7 @@ impl<R: DatabaseProviderRegistry> ExportRepoUseCase<R> {
                     )));
                 }
             }
-            dir
+            resolved_output
         } else {
             path.join(".gfs").join("exports")
         };
@@ -629,5 +629,31 @@ mod tests {
             .run(dir.path(), Some(dir.path().to_path_buf()), "custom")
             .await;
         assert!(matches!(result, Err(ExportRepoError::UnsupportedFormat(_))));
+    }
+
+    #[tokio::test]
+    async fn export_default_output_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let env = EnvironmentConfig {
+            database_provider: "postgres".into(),
+            database_version: "17".into(),
+        };
+        let runtime = RuntimeConfig {
+            runtime_provider: "docker".into(),
+            runtime_version: "24".into(),
+            container_name: "container-1".into(),
+        };
+        create_repo_with_config(dir.path(), &env, &runtime);
+
+        let usecase = ExportRepoUseCase::new(
+            Arc::new(MockCompute { exit_code: 0 }),
+            Arc::new(MockRegistry),
+        );
+        let result = usecase.run(dir.path(), None, "sql").await;
+        assert!(result.is_ok());
+        let output = result.unwrap();
+        assert_eq!(output.format, "sql");
+        assert!(output.file_path.ends_with("export.sql"));
+        assert!(output.file_path.to_string_lossy().contains(".gfs/exports"));
     }
 }

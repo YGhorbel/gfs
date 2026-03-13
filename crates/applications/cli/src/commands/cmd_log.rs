@@ -1,13 +1,13 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::Result;
 use gfs_domain::adapters::gfs_repository::GfsRepository;
 use gfs_domain::ports::repository::Repository;
 use gfs_domain::usecases::repository::log_repo_usecase::LogRepoUseCase;
 
 use crate::cli_utils::get_repo_dir;
 use crate::output::{dimmed, green};
+use crate::println_safe;
 
 // ---------------------------------------------------------------------------
 // Entry point called from main
@@ -19,7 +19,7 @@ pub async fn log(
     from: Option<String>,
     until: Option<String>,
     full_hash: bool,
-) -> Result<()> {
+) -> std::result::Result<(), anyhow::Error> {
     let repo_path = path.unwrap_or_else(get_repo_dir);
 
     let repository: Arc<dyn Repository> = Arc::new(GfsRepository::new());
@@ -37,7 +37,7 @@ pub async fn log(
         .map_err(|e| anyhow::anyhow!("{e}"))?;
 
     for cwr in &commits {
-        print_commit_block(cwr, full_hash);
+        print_commit_block(cwr, full_hash)?;
     }
 
     Ok(())
@@ -47,7 +47,10 @@ pub async fn log(
 // Display (git-style format)
 // ---------------------------------------------------------------------------
 
-fn print_commit_block(cwr: &gfs_domain::model::commit::CommitWithRefs, full_hash: bool) {
+fn print_commit_block(
+    cwr: &gfs_domain::model::commit::CommitWithRefs,
+    full_hash: bool,
+) -> std::result::Result<(), std::io::Error> {
     let hash_full = cwr
         .commit
         .hash
@@ -63,7 +66,7 @@ fn print_commit_block(cwr: &gfs_domain::model::commit::CommitWithRefs, full_hash
     } else {
         format!(" ({})", cwr.refs.join(", "))
     };
-    println!(
+    println_safe!(
         "{} {}{}",
         dimmed("commit"),
         dimmed(hash_display),
@@ -82,17 +85,18 @@ fn print_commit_block(cwr: &gfs_domain::model::commit::CommitWithRefs, full_hash
             dimmed(author_email)
         )
     };
-    println!("{}", author_line);
+    println_safe!("{}", author_line);
 
     let date_str = cwr.commit.author_date.format("%a %b %e %H:%M:%S %Y %z");
-    println!("{}   {}", dimmed("Date:"), date_str);
+    println_safe!("{}   {}", dimmed("Date:"), date_str);
 
-    println!();
+    println_safe!();
     for line in cwr.commit.message.lines() {
-        println!("    {}", line);
+        println_safe!("    {}", line);
     }
     if !cwr.commit.message.ends_with('\n') && !cwr.commit.message.is_empty() {
-        println!();
+        println_safe!();
     }
-    println!();
+    println_safe!();
+    Ok(())
 }

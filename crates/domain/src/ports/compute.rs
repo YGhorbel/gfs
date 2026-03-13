@@ -31,6 +31,13 @@ pub enum ComputeError {
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 
+    #[error("cannot mount {path} to Docker container: {reason}\n\n{suggestion}")]
+    DockerMountFailed {
+        path: PathBuf,
+        reason: String,
+        suggestion: String,
+    },
+
     #[error("internal error: {0}")]
     Internal(String),
 }
