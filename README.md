@@ -14,7 +14,7 @@
     <a href="https://github.com/Guepard-Corp/gfs/actions/workflows/main.yml" target="_blank">
         <img src="https://img.shields.io/github/actions/workflow/status/Guepard-Corp/gfs/main.yml?branch=main" alt="Build">
     </a>
-    <a href="https://github.com/Guepard-Corp/gfs/blob/main/LICENCE" target="_blank">
+    <a href="https://github.com/Guepard-Corp/gfs/blob/main/LICENSE" target="_blank">
         <img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License" />
     </a>
     <a href="https://github.com/Guepard-Corp/gfs/pulls" target="_blank">
@@ -504,7 +504,7 @@ Check [Roadmap](ROADMAP.md)
 
 ## License
 
-This project is licensed under MIT License. See the [LICENSE](LICENCE) file for details.
+This project is licensed under MIT License. See the [LICENSE](LICENSE) file for details.
 
 ---
 
