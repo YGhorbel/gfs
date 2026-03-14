@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.13] - 2026-03-14
+
+Binaries for this release are available on [GitHub Releases](https://github.com/Guepard-Corp/gfs/releases/tag/v0.1.13).
+
+### Bug Fixes
+
+- fix: release telemetry
+- fix: version exit code
+- fix: use workspace-relative paths for Docker mounts and add export directory defaults
+- fix: workspace-relative Docker mounts and export directory defaults 2
+- fix: workspace-relative Docker mounts and export directory defaults 3
+- fix: better error management
+- fix: fix tests
+
+### Documentation
+
+- docs: rewrite README to emphasize AI coding agents use case
+- docs: switch licence to MIT
+
+### Chores
+
+- chore: update changelog and fix typos
+- chore: bump version to 0.1.13
+
+### CI
+
+- ci: better pr workflow
+- ci: add changelog generation
+
 ## [0.1.12] - 2026-03-05
 
 Binaries for this release are available on [GitHub Releases](https://github.com/Guepard-Corp/gfs/releases/tag/v0.1.12).
@@ -23,7 +52,8 @@ Binaries for this release are available on [GitHub Releases](https://github.com/
 
 Binaries for this release are available on [GitHub Releases](https://github.com/Guepard-Corp/gfs/releases/tag/v0.1.3).
 
-[Unreleased]: https://github.com/Guepard-Corp/gfs/compare/v0.1.12...HEAD
+[Unreleased]: https://github.com/Guepard-Corp/gfs/compare/v0.1.13...HEAD
+[0.1.13]: https://github.com/Guepard-Corp/gfs/releases/tag/v0.1.13
 [0.1.12]: https://github.com/Guepard-Corp/gfs/releases/tag/v0.1.12
 [0.1.10]: https://github.com/Guepard-Corp/gfs/releases/tag/v0.1.10
 [0.1.4]: https://github.com/Guepard-Corp/gfs/releases/tag/v0.1.4
