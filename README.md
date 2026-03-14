@@ -20,6 +20,8 @@
     <a href="https://github.com/Guepard-Corp/gfs/pulls" target="_blank">
         <img src="https://img.shields.io/badge/PRs-welcome-brightgreen.svg" alt="PRs Welcome" />
     </a>
+    <a href="https://www.bestpractices.dev/projects/12172"><img src="https://www.bestpractices.dev/projects/12172/badge"></a>
+    <a href="https://scorecard.dev/viewer/?uri=github.com/Guepard-Corp/gfs"><img src="https://api.scorecard.dev/projects/github.com/Guepard-Corp/gfs/badge"></a>
     </p>
     <p>Works with Claude Code, Cursor, Cline, Windsurf, and any skills / MCP-compatible agent</p>
     <img src="resources/GFSShowcase.gif" alt="GFS Showcase" />
