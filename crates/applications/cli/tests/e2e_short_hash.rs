@@ -244,7 +244,10 @@ fn short_hash_works_with_tilde_notation() {
 
     // Verify we're 2 commits back (at commit 1). The first commit has a real hash, not "0".
     let current = repo_layout::get_current_commit_id(repo_path).expect("get current commit");
-    assert_eq!(current, hash1, "should be checked out to first commit (hash1)");
+    assert_eq!(
+        current, hash1,
+        "should be checked out to first commit (hash1)"
+    );
 }
 
 #[test]

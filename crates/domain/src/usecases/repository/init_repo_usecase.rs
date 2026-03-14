@@ -161,6 +161,7 @@ mod tests {
 
     use async_trait::async_trait;
 
+    use crate::adapters::gfs_repository::GfsRepository;
     use crate::model::config::{EnvironmentConfig, RuntimeConfig};
     use crate::ports::compute::{
         Compute, ComputeDefinition, InstanceId, InstanceState, InstanceStatus, StartOptions,
@@ -169,7 +170,6 @@ mod tests {
         ConnectionParams, DatabaseProvider, DatabaseProviderArg, DatabaseProviderRegistry,
         ProviderError, Result as RegistryResult, SIGTERM, SupportedFeature,
     };
-    use crate::adapters::gfs_repository::GfsRepository;
     use crate::ports::repository::{Repository, RepositoryError};
 
     struct MockRepository;
