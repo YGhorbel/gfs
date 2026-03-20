@@ -83,7 +83,10 @@ impl<R: DatabaseProviderRegistry> CheckoutRepoUseCase<R> {
             });
 
         if let Some(ref id) = container_id {
-            let _ = self.compute.stop(id).await?;
+            match self.compute.stop(id).await {
+                Ok(_) | Err(ComputeError::NotFound(_)) => {}
+                Err(e) => return Err(CheckoutRepoError::Compute(e)),
+            }
         }
 
         let commit_hash = self.do_checkout(&path, &revision, create_branch).await?;
@@ -190,14 +193,25 @@ impl<R: DatabaseProviderRegistry> CheckoutRepoUseCase<R> {
 
         if !paths_differ(&active_str, current_bind.as_deref().unwrap_or("")) {
             tracing::info!("ensure_compute_started_after_checkout: starting existing container");
-            let _ = self.compute.start(instance_id, Default::default()).await?;
-            return Ok(());
+            match self.compute.start(instance_id, Default::default()).await {
+                Ok(_) => return Ok(()),
+                Err(ComputeError::NotFound(_)) => {
+                    // Container was removed externally; fall through to recreate it.
+                    tracing::info!(
+                        "ensure_compute_started_after_checkout: container not found, recreating"
+                    );
+                }
+                Err(e) => return Err(CheckoutRepoError::Compute(e)),
+            }
         }
 
         tracing::info!(
             "ensure_compute_started_after_checkout: removing old container and creating new one"
         );
-        self.compute.remove_instance(instance_id).await?;
+        match self.compute.remove_instance(instance_id).await {
+            Ok(()) | Err(ComputeError::NotFound(_)) => {}
+            Err(e) => return Err(CheckoutRepoError::Compute(e)),
+        }
         let new_id = self.compute.provision(&definition).await?;
         let _ = self.compute.start(&new_id, Default::default()).await?;
         self.repository
@@ -674,5 +688,338 @@ mod tests {
             .run(dir.path().to_path_buf(), "main".into(), None)
             .await;
         assert!(result.is_ok());
+    }
+
+    /// Simulates a container that was manually removed from Docker:
+    /// `stop`, `remove_instance`, and `get_instance_data_mount_host_path` all
+    /// return `NotFound`; `provision` and `start` succeed (new container).
+    struct MockComputeRemoved;
+
+    #[async_trait]
+    impl Compute for MockComputeRemoved {
+        async fn provision(
+            &self,
+            _: &ComputeDefinition,
+        ) -> crate::ports::compute::Result<InstanceId> {
+            Ok(InstanceId("new-container".into()))
+        }
+        async fn start(
+            &self,
+            id: &InstanceId,
+            _: StartOptions,
+        ) -> crate::ports::compute::Result<InstanceStatus> {
+            Ok(InstanceStatus {
+                id: id.clone(),
+                state: InstanceState::Running,
+                pid: None,
+                started_at: None,
+                exit_code: None,
+            })
+        }
+        async fn stop(&self, _: &InstanceId) -> crate::ports::compute::Result<InstanceStatus> {
+            Err(ComputeError::NotFound("container-1".into()))
+        }
+        async fn restart(&self, id: &InstanceId) -> crate::ports::compute::Result<InstanceStatus> {
+            Ok(InstanceStatus {
+                id: id.clone(),
+                state: InstanceState::Running,
+                pid: None,
+                started_at: None,
+                exit_code: None,
+            })
+        }
+        async fn status(&self, id: &InstanceId) -> crate::ports::compute::Result<InstanceStatus> {
+            Ok(InstanceStatus {
+                id: id.clone(),
+                state: InstanceState::Running,
+                pid: None,
+                started_at: None,
+                exit_code: None,
+            })
+        }
+        async fn prepare_for_snapshot(
+            &self,
+            _: &InstanceId,
+            _: &[String],
+        ) -> crate::ports::compute::Result<()> {
+            Ok(())
+        }
+        async fn logs(
+            &self,
+            _: &InstanceId,
+            _: crate::ports::compute::LogsOptions,
+        ) -> crate::ports::compute::Result<Vec<crate::ports::compute::LogEntry>> {
+            Ok(vec![])
+        }
+        async fn pause(&self, id: &InstanceId) -> crate::ports::compute::Result<InstanceStatus> {
+            Ok(InstanceStatus {
+                id: id.clone(),
+                state: InstanceState::Paused,
+                pid: None,
+                started_at: None,
+                exit_code: None,
+            })
+        }
+        async fn unpause(&self, id: &InstanceId) -> crate::ports::compute::Result<InstanceStatus> {
+            Ok(InstanceStatus {
+                id: id.clone(),
+                state: InstanceState::Running,
+                pid: None,
+                started_at: None,
+                exit_code: None,
+            })
+        }
+        async fn get_connection_info(
+            &self,
+            _id: &InstanceId,
+            port: u16,
+        ) -> crate::ports::compute::Result<crate::ports::compute::InstanceConnectionInfo> {
+            Ok(crate::ports::compute::InstanceConnectionInfo {
+                host: "127.0.0.1".into(),
+                port,
+                env: vec![],
+            })
+        }
+        async fn get_instance_data_mount_host_path(
+            &self,
+            _id: &InstanceId,
+            _: &str,
+        ) -> crate::ports::compute::Result<Option<PathBuf>> {
+            Err(ComputeError::NotFound("container-1".into()))
+        }
+        async fn remove_instance(&self, _id: &InstanceId) -> crate::ports::compute::Result<()> {
+            Err(ComputeError::NotFound("container-1".into()))
+        }
+        async fn get_task_connection_info(
+            &self,
+            _id: &InstanceId,
+            port: u16,
+        ) -> crate::ports::compute::Result<crate::ports::compute::InstanceConnectionInfo> {
+            Ok(crate::ports::compute::InstanceConnectionInfo {
+                host: "172.17.0.2".into(),
+                port,
+                env: vec![],
+            })
+        }
+        async fn run_task(
+            &self,
+            _: &ComputeDefinition,
+            _: &str,
+            _: Option<&InstanceId>,
+        ) -> crate::ports::compute::Result<crate::ports::compute::ExecOutput> {
+            Ok(crate::ports::compute::ExecOutput {
+                exit_code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        }
+    }
+
+    /// Repository variant that exposes a database environment config so the
+    /// `ensure_compute_started_after_checkout` recreate path is exercised.
+    struct MockRepositoryWithEnv {
+        current_commit: String,
+    }
+
+    #[async_trait]
+    impl Repository for MockRepositoryWithEnv {
+        async fn init(
+            &self,
+            _: &std::path::Path,
+            _: Option<String>,
+        ) -> crate::ports::repository::Result<()> {
+            Ok(())
+        }
+        async fn get_workspace_data_dir_for_head(
+            &self,
+            _: &std::path::Path,
+        ) -> crate::ports::repository::Result<PathBuf> {
+            Ok(PathBuf::from("/workspace/data"))
+        }
+        async fn update_environment_config(
+            &self,
+            _: &std::path::Path,
+            _: EnvironmentConfig,
+        ) -> crate::ports::repository::Result<()> {
+            Ok(())
+        }
+        async fn update_runtime_config(
+            &self,
+            _: &std::path::Path,
+            _: RuntimeConfig,
+        ) -> crate::ports::repository::Result<()> {
+            Ok(())
+        }
+        async fn clone_repo(
+            &self,
+            _: &str,
+            _: &std::path::Path,
+        ) -> crate::ports::repository::Result<()> {
+            Ok(())
+        }
+        async fn commit(
+            &self,
+            _: &std::path::Path,
+            _: crate::model::commit::NewCommit,
+        ) -> crate::ports::repository::Result<String> {
+            Ok(String::new())
+        }
+        async fn checkout(
+            &self,
+            _: &std::path::Path,
+            _: &str,
+        ) -> crate::ports::repository::Result<()> {
+            Ok(())
+        }
+        async fn create_branch(
+            &self,
+            _: &std::path::Path,
+            _: &str,
+            _: &str,
+        ) -> crate::ports::repository::Result<()> {
+            Ok(())
+        }
+        async fn log(
+            &self,
+            _: &std::path::Path,
+            _: crate::ports::repository::LogOptions,
+        ) -> crate::ports::repository::Result<Vec<crate::model::commit::CommitWithRefs>> {
+            Ok(vec![])
+        }
+        async fn rev_parse(
+            &self,
+            _: &std::path::Path,
+            _: &str,
+        ) -> crate::ports::repository::Result<String> {
+            Ok(self.current_commit.clone())
+        }
+        async fn push(
+            &self,
+            _: &std::path::Path,
+            _: crate::ports::repository::RemoteOptions,
+        ) -> crate::ports::repository::Result<()> {
+            Ok(())
+        }
+        async fn pull(
+            &self,
+            _: &std::path::Path,
+            _: crate::ports::repository::RemoteOptions,
+        ) -> crate::ports::repository::Result<()> {
+            Ok(())
+        }
+        async fn fetch(
+            &self,
+            _: &std::path::Path,
+            _: crate::ports::repository::RemoteOptions,
+        ) -> crate::ports::repository::Result<()> {
+            Ok(())
+        }
+        async fn get_current_branch(
+            &self,
+            _: &std::path::Path,
+        ) -> crate::ports::repository::Result<String> {
+            Ok("main".into())
+        }
+        async fn get_current_commit_id(
+            &self,
+            _: &std::path::Path,
+        ) -> crate::ports::repository::Result<String> {
+            Ok(self.current_commit.clone())
+        }
+        async fn get_runtime_config(
+            &self,
+            _: &std::path::Path,
+        ) -> crate::ports::repository::Result<Option<RuntimeConfig>> {
+            Ok(Some(RuntimeConfig {
+                runtime_provider: "docker".into(),
+                runtime_version: "24".into(),
+                container_name: "container-1".into(),
+            }))
+        }
+        async fn get_mount_point(
+            &self,
+            _: &std::path::Path,
+        ) -> crate::ports::repository::Result<Option<String>> {
+            Ok(None)
+        }
+        async fn get_environment_config(
+            &self,
+            _: &std::path::Path,
+        ) -> crate::ports::repository::Result<Option<EnvironmentConfig>> {
+            Ok(Some(EnvironmentConfig {
+                database_provider: "postgres".into(),
+                database_version: "17".into(),
+                database_port: None,
+            }))
+        }
+        async fn get_user_config(
+            &self,
+            _: &std::path::Path,
+        ) -> crate::ports::repository::Result<Option<crate::model::config::UserConfig>> {
+            Ok(None)
+        }
+        async fn ensure_snapshot_path(
+            &self,
+            _: &std::path::Path,
+            _: &str,
+        ) -> crate::ports::repository::Result<PathBuf> {
+            Ok(PathBuf::from("/tmp/snap"))
+        }
+        async fn get_active_workspace_data_dir(
+            &self,
+            _: &std::path::Path,
+        ) -> crate::ports::repository::Result<PathBuf> {
+            Ok(PathBuf::from("/workspace/data"))
+        }
+    }
+
+    /// When the container has been manually removed from Docker (stop returns NotFound)
+    /// and there is no database environment configured, checkout must still succeed.
+    #[tokio::test]
+    async fn checkout_succeeds_when_container_removed_no_env() {
+        let repo = MockRepository {
+            current_commit: "abc123".into(),
+            runtime_config: Some(RuntimeConfig {
+                runtime_provider: "docker".into(),
+                runtime_version: "24".into(),
+                container_name: "container-1".into(),
+            }),
+        };
+        let usecase = CheckoutRepoUseCase::new(
+            Arc::new(repo),
+            Arc::new(MockComputeRemoved),
+            Arc::new(MockRegistry),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let result = usecase
+            .run(dir.path().to_path_buf(), "main".into(), None)
+            .await;
+        assert!(
+            result.is_ok(),
+            "checkout should succeed even when container was removed: {result:?}"
+        );
+    }
+
+    /// When the container has been manually removed from Docker and a database
+    /// environment is configured, checkout must succeed and GFS must recreate
+    /// the compute (provision + start) using the current workspace data dir.
+    #[tokio::test]
+    async fn checkout_recreates_compute_when_container_removed() {
+        let repo = MockRepositoryWithEnv {
+            current_commit: "abc123".into(),
+        };
+        let usecase = CheckoutRepoUseCase::new(
+            Arc::new(repo),
+            Arc::new(MockComputeRemoved),
+            Arc::new(MockRegistry),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let result = usecase
+            .run(dir.path().to_path_buf(), "main".into(), None)
+            .await;
+        assert!(
+            result.is_ok(),
+            "checkout should recreate compute when container was removed: {result:?}"
+        );
     }
 }
