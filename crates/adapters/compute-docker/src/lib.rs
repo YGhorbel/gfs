@@ -38,7 +38,7 @@ impl DockerCompute {
     ///
     /// Returns an error if the socket cannot be opened (e.g. Docker is not
     /// running or the socket path has wrong permissions).
-    pub fn new() -> std::result::Result<Self, bollard::errors::Error> {
+    pub fn new() -> std::result::Result<Self, ComputeError> {
         match bollard::Docker::connect_with_local_defaults() {
             Ok(docker) => Ok(Self { docker }),
             Err(default_err) => {
@@ -64,7 +64,8 @@ impl DockerCompute {
                     }
                 }
 
-                Err(default_err)
+                tracing::debug!("Docker connect error: {default_err}");
+                Err(ComputeError::NotAvailable("Docker".to_string()))
             }
         }
     }
