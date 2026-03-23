@@ -1,11 +1,27 @@
 use gfs_domain::ports::compute::ComputeError;
 
+fn is_connection_error(err: &bollard::errors::Error) -> bool {
+    if let bollard::errors::Error::IOError { err: io_err } = err {
+        let kind = io_err.kind();
+        if matches!(
+            kind,
+            std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::PermissionDenied
+        ) {
+            return true;
+        }
+    }
+    err.to_string().to_ascii_lowercase().contains("connect")
+}
+
 /// Classify a bollard error into the appropriate [`ComputeError`] variant.
 ///
 /// Bollard surfaces Docker daemon errors as [`bollard::errors::Error::DockerResponseServerError`]
 /// with an HTTP status code and a message string. We inspect both the status and
 /// the message body to produce the most specific `ComputeError`.
 pub(crate) fn classify(container_id: &str, err: bollard::errors::Error) -> ComputeError {
+    if is_connection_error(&err) {
+        return ComputeError::NotAvailable("Docker".to_string());
+    }
     match &err {
         bollard::errors::Error::DockerResponseServerError {
             status_code,
@@ -103,11 +119,33 @@ mod tests {
     }
 
     #[test]
-    fn classify_io_error() {
+    fn classify_io_error_connection_refused_is_not_available() {
         let err = classify(
             "c1",
             bollard::errors::Error::IOError {
                 err: io::Error::new(io::ErrorKind::ConnectionRefused, "connection refused"),
+            },
+        );
+        assert!(matches!(err, ComputeError::NotAvailable(_)));
+    }
+
+    #[test]
+    fn classify_io_error_permission_denied_is_not_available() {
+        let err = classify(
+            "c1",
+            bollard::errors::Error::IOError {
+                err: io::Error::new(io::ErrorKind::PermissionDenied, "permission denied"),
+            },
+        );
+        assert!(matches!(err, ComputeError::NotAvailable(_)));
+    }
+
+    #[test]
+    fn classify_io_error_other_is_internal() {
+        let err = classify(
+            "c1",
+            bollard::errors::Error::IOError {
+                err: io::Error::new(io::ErrorKind::TimedOut, "timed out"),
             },
         );
         assert!(matches!(err, ComputeError::Internal(_)));
