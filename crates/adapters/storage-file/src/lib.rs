@@ -122,9 +122,6 @@ async fn make_read_only(path: &Path) -> Result<()> {
 
 #[cfg(target_os = "windows")]
 async fn make_read_only(path: &Path) -> Result<()> {
-    // Read-only **attribute** (+R) on the tree. `icacls /deny` on `%TEMP%` often returns
-    // "access denied" when applying recursive denies; +R is enough for snapshot protection
-    // and matches typical "read-only folder" expectations for data copies.
     let p = path.to_string_lossy().into_owned();
     let out = Command::new("cmd")
         .args(["/C", "attrib", "+R", "/S", "/D", &p])
@@ -155,11 +152,8 @@ async fn make_read_only(path: &Path) -> Result<()> {
 /// * **macOS** – `cp -cRp` triggers clonefile(2) COW on APFS.
 /// * **Linux** – `cp --reflink=auto -a` uses Btrfs/XFS COW when available,
 ///   and falls back to a regular deep copy on other filesystems.
-/// * **Windows** – `robocopy /E /COPY:DAT` mirrors a directory tree (data,
-///   attributes, timestamps). `/COPYALL` is avoided: it copies auditing info
-///   and can fail without the “manage auditing” privilege.
+/// * **Windows** – `robocopy /E /COPY:DAT` (not `/COPYALL`, which needs audit privileges).
 async fn copy_dir(src: &str, dst: &str) -> Result<()> {
-    // Ensure the parent directory of the destination exists.
     let dst_path = Path::new(dst);
     if let Some(parent) = dst_path.parent() {
         tokio::fs::create_dir_all(parent)
@@ -175,8 +169,6 @@ async fn copy_dir(src: &str, dst: &str) -> Result<()> {
 
     #[cfg(target_os = "windows")]
     let (prog, args): (&str, Vec<&str>) = {
-        // robocopy exit codes 0–7 mean success (7 = all ok + some files skipped).
-        // We handle the exit code check manually below.
         (
             "robocopy",
             vec![
@@ -202,7 +194,6 @@ async fn copy_dir(src: &str, dst: &str) -> Result<()> {
         .await
         .map_err(StorageError::Io)?;
 
-    // robocopy uses non-zero exit codes (1–7) for success on Windows.
     #[cfg(target_os = "windows")]
     let success = output.status.code().map(|c| c <= 7).unwrap_or(false);
 
@@ -853,8 +844,6 @@ mod tests {
         fs::remove_dir_all(&dst).ok();
     }
 
-    /// Unix: `chmod -R a-w` blocks new files in the snapshot tree. Windows uses `attrib +R`,
-    /// which does not reliably prevent `fs::write` of new files under a directory — skip here.
     #[tokio::test]
     #[cfg(unix)]
     async fn test_snapshot_is_read_only() {
