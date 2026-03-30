@@ -123,26 +123,41 @@ async fn make_read_only(path: &Path) -> Result<()> {
 #[cfg(target_os = "windows")]
 async fn make_read_only(path: &Path) -> Result<()> {
     let p = path.to_string_lossy().into_owned();
+    // Set read-only on the directory itself.
     let out = Command::new("cmd")
-        .args(["/C", "attrib", "+R", "/S", "/D", &p])
+        .args(["/C", "attrib", "+R", &p])
         .output()
         .await
         .map_err(StorageError::Io)?;
     if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        return Err(StorageError::Internal(format!(
-            "attrib +R failed for '{}': {}{}",
-            path.display(),
-            stderr.trim(),
-            if stdout.is_empty() {
-                String::new()
-            } else {
-                format!(" ({})", stdout.trim())
-            }
-        )));
+        return Err(attrib_error(path, &out));
+    }
+    let contents = format!(r"{}\*", p);
+    let out = Command::new("cmd")
+        .args(["/C", "attrib", "+R", "/S", "/D", &contents])
+        .output()
+        .await
+        .map_err(StorageError::Io)?;
+    if !out.status.success() {
+        return Err(attrib_error(path, &out));
     }
     Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn attrib_error(path: &Path, out: &std::process::Output) -> StorageError {
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    StorageError::Internal(format!(
+        "attrib +R failed for '{}': {}{}",
+        path.display(),
+        stderr.trim(),
+        if stdout.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", stdout.trim())
+        }
+    ))
 }
 
 // ── Cross-platform directory copy ──────────────────────────────────────────
@@ -879,6 +894,56 @@ mod tests {
 
         Command::new("chmod")
             .args(["-R", "u+w", dst.to_str().unwrap()])
+            .output()
+            .await
+            .ok();
+        fs::remove_dir_all(&src).ok();
+        fs::remove_dir_all(&dst).ok();
+    }
+
+    #[tokio::test]
+    #[cfg(windows)]
+    async fn test_snapshot_is_read_only_windows() {
+        let src = make_source();
+        let dst = {
+            let mut p = std::env::temp_dir();
+            p.push(format!(
+                "gfs-ro-dst-{}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos()
+            ));
+            p
+        };
+
+        let storage = FileStorage::new();
+        let vol_id = VolumeId(src.to_string_lossy().into_owned());
+        let opts = SnapshotOptions {
+            label: Some(dst.to_string_lossy().into_owned()),
+        };
+
+        storage
+            .snapshot(&vol_id, opts)
+            .await
+            .expect("snapshot failed");
+
+        // attrib +R prevents overwriting existing files
+        let write_result = fs::write(dst.join("hello.txt"), b"overwrite");
+        assert!(
+            write_result.is_err(),
+            "expected overwrite of read-only file in snapshot to fail"
+        );
+
+        // cleanup: remove read-only attribute before deletion
+        let dst_str = dst.to_string_lossy().into_owned();
+        Command::new("cmd")
+            .args(["/C", "attrib", "-R", &dst_str])
+            .output()
+            .await
+            .ok();
+        Command::new("cmd")
+            .args(["/C", "attrib", "-R", "/S", "/D", &format!(r"{}\*", dst_str)])
             .output()
             .await
             .ok();
