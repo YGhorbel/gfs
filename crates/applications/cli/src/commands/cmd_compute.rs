@@ -9,7 +9,9 @@ use gfs_domain::ports::database_provider::{
     DatabaseProviderRegistry, InMemoryDatabaseProviderRegistry,
 };
 use gfs_domain::repo_utils::repo_layout;
-use gfs_domain::utils::{current_user, data_dir};
+#[cfg(unix)]
+use gfs_domain::utils::current_user;
+use gfs_domain::utils::data_dir;
 
 use crate::ComputeAction;
 use crate::cli_utils::{get_repo_dir, relativize_to_repo};
@@ -30,6 +32,7 @@ fn resolve_id(path: Option<PathBuf>, action: &ComputeAction) -> Result<String> {
         ComputeAction::Pause { id } => id.as_deref(),
         ComputeAction::Unpause { id } => id.as_deref(),
         ComputeAction::Logs { id, .. } => id.as_deref(),
+        ComputeAction::Config { .. } => return Ok(String::new()),
     };
     if let Some(id) = id_from_action {
         return Ok(id.to_string());
@@ -47,10 +50,37 @@ fn resolve_id(path: Option<PathBuf>, action: &ComputeAction) -> Result<String> {
 }
 
 pub async fn run(path: Option<PathBuf>, action: ComputeAction) -> Result<()> {
+    if let ComputeAction::Config { ref key, ref value } = action {
+        return handle_config(path, key, value);
+    }
     let compute = DockerCompute::new()
-        .map_err(|e| anyhow::anyhow!("failed to connect to Docker daemon: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("failed to connect to Docker/Podman daemon: {e}"))?;
     let id = resolve_id(path.clone(), &action)?;
     dispatch(&compute, &id, action, path).await
+}
+
+fn handle_config(path: Option<PathBuf>, key: &str, value: &str) -> Result<()> {
+    match key {
+        "db.port" => {
+            let port: u16 = value
+                .parse()
+                .map_err(|_| anyhow::anyhow!("'{}' is not a valid port number (1-65535)", value))?;
+            let repo_path = path.unwrap_or_else(get_repo_dir);
+            let mut config = GfsConfig::load(&repo_path)
+                .context("not a gfs repository (use --path <repo> or run from a repo)")?;
+            if let Some(ref mut env) = config.environment {
+                env.database_port = Some(port);
+            } else {
+                anyhow::bail!(
+                    "no environment config found; run 'gfs init --database-provider ...' first"
+                );
+            }
+            config.save(&repo_path).context("failed to save config")?;
+            println!("database_port updated to {port}. Run 'gfs compute restart' to apply.");
+            Ok(())
+        }
+        _ => anyhow::bail!("unknown config key '{}'; supported keys: db.port", key),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -124,6 +154,8 @@ async fn dispatch(
                 .map_err(anyhow::Error::from)?;
             print_status(&status);
         }
+
+        ComputeAction::Config { .. } => unreachable!("Config is handled before dispatch"),
 
         ComputeAction::Logs {
             tail,

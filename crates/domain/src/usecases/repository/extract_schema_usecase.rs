@@ -763,6 +763,7 @@ GFS_SCHEMA_COLUMNS
             Some(EnvironmentConfig {
                 database_provider: "unknown-provider".into(),
                 database_version: "17".into(),
+                database_port: None,
             }),
             Some(RuntimeConfig {
                 runtime_provider: "docker".into(),
@@ -796,6 +797,7 @@ GFS_SCHEMA_COLUMNS
             Some(EnvironmentConfig {
                 database_provider: "mock-schema".into(),
                 database_version: "17".into(),
+                database_port: None,
             }),
             Some(RuntimeConfig {
                 runtime_provider: "docker".into(),
@@ -835,6 +837,7 @@ GFS_SCHEMA_COLUMNS
             Some(EnvironmentConfig {
                 database_provider: "mock-schema".into(),
                 database_version: "17".into(),
+                database_port: None,
             }),
             Some(RuntimeConfig {
                 runtime_provider: "docker".into(),
@@ -899,6 +902,7 @@ GFS_SCHEMA_COLUMNS
             Some(EnvironmentConfig {
                 database_provider: "mock-schema".into(),
                 database_version: "17".into(),
+                database_port: None,
             }),
             Some(RuntimeConfig {
                 runtime_provider: "docker".into(),

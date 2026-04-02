@@ -15,6 +15,7 @@ pub async fn init(
     path: Option<PathBuf>,
     database_provider: Option<String>,
     database_version: Option<String>,
+    database_port: Option<u16>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     tracing::trace!("Initializing Guepard environment at: {:?}", path);
 
@@ -22,7 +23,7 @@ pub async fn init(
 
     let repository: Arc<dyn Repository> = Arc::new(GfsRepository::new());
     let compute: Option<Arc<dyn Compute>> = if database_provider.is_some() {
-        Some(Arc::new(DockerCompute::new().map_err(|e| e.to_string())?))
+        Some(Arc::new(DockerCompute::new()?))
     } else {
         None
     };
@@ -32,7 +33,13 @@ pub async fn init(
 
     let use_case = InitRepositoryUseCase::new(repository, compute, registry);
     use_case
-        .run(target_path, None, database_provider, database_version)
+        .run(
+            target_path,
+            None,
+            database_provider,
+            database_version,
+            database_port,
+        )
         .await?;
 
     Ok(())

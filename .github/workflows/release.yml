@@ -20,7 +20,6 @@ jobs:
       contents: write
     outputs:
       version: ${{ steps.new_version.outputs.version }}
-      upload_url: ${{ steps.create_release.outputs.upload_url }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -104,18 +103,68 @@ jobs:
           git tag -a "v${{ steps.new_version.outputs.version }}" -m "Release ${{ steps.new_version.outputs.version }}"
           git push origin "v${{ steps.new_version.outputs.version }}"
 
+      - name: Generate changelog from conventional commits
+        id: changelog
+        run: |
+          # Find the previous tag (skip the one we just created)
+          CURRENT_TAG="v${{ steps.new_version.outputs.version }}"
+          PREVIOUS_TAG=$(git tag --sort=-v:refname | grep '^v' | grep -v "^${CURRENT_TAG}$" | head -n 1)
+
+          if [ -z "$PREVIOUS_TAG" ]; then
+            RANGE="HEAD"
+          else
+            RANGE="${PREVIOUS_TAG}..HEAD"
+          fi
+
+          FEATURES=$(git log "$RANGE" --pretty=format:"- %s (%h)" --grep="^feat" --no-merges)
+          FIXES=$(git log "$RANGE" --pretty=format:"- %s (%h)" --grep="^fix" --no-merges)
+          PERF=$(git log "$RANGE" --pretty=format:"- %s (%h)" --grep="^perf" --no-merges)
+          DOCS=$(git log "$RANGE" --pretty=format:"- %s (%h)" --grep="^docs" --no-merges)
+          REFACTOR=$(git log "$RANGE" --pretty=format:"- %s (%h)" --grep="^refactor" --no-merges)
+          CHORE=$(git log "$RANGE" --pretty=format:"- %s (%h)" --grep="^chore" --no-merges)
+          CI=$(git log "$RANGE" --pretty=format:"- %s (%h)" --grep="^ci" --no-merges)
+
+          CHANGELOG=""
+
+          if [ -n "$FEATURES" ]; then
+            CHANGELOG="${CHANGELOG}### 🚀 Features\n\n${FEATURES}\n\n"
+          fi
+          if [ -n "$FIXES" ]; then
+            CHANGELOG="${CHANGELOG}### 🐛 Bug Fixes\n\n${FIXES}\n\n"
+          fi
+          if [ -n "$PERF" ]; then
+            CHANGELOG="${CHANGELOG}### ⚡ Performance\n\n${PERF}\n\n"
+          fi
+          if [ -n "$DOCS" ]; then
+            CHANGELOG="${CHANGELOG}### 📚 Documentation\n\n${DOCS}\n\n"
+          fi
+          if [ -n "$REFACTOR" ]; then
+            CHANGELOG="${CHANGELOG}### ♻️ Refactoring\n\n${REFACTOR}\n\n"
+          fi
+          if [ -n "$CHORE" ]; then
+            CHANGELOG="${CHANGELOG}### 🔧 Chores\n\n${CHORE}\n\n"
+          fi
+          if [ -n "$CI" ]; then
+            CHANGELOG="${CHANGELOG}### 👷 CI\n\n${CI}\n\n"
+          fi
+
+          if [ -z "$CHANGELOG" ]; then
+            CHANGELOG="No conventional commits found in this release.\n"
+          fi
+
+          echo -e "$CHANGELOG" > changelog.md
+
+          if [ -n "$PREVIOUS_TAG" ]; then
+            echo "**Full Changelog**: https://github.com/${{ github.repository }}/compare/${PREVIOUS_TAG}...${CURRENT_TAG}" >> changelog.md
+          fi
+
       - name: Create GitHub Release
         id: create_release
-        uses: actions/create-release@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ steps.new_version.outputs.version }}
-          release_name: Release ${{ steps.new_version.outputs.version }}
-          body: |
-            ## Release ${{ steps.new_version.outputs.version }}
-
-            Binaries for this release are available below.
+          name: Release ${{ steps.new_version.outputs.version }}
+          body_path: changelog.md
           draft: false
           prerelease: false
 
@@ -147,6 +196,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     permissions:
       contents: write
+    env:
+      GFS_POSTHOG_API_KEY: ${{ secrets.GFS_POSTHOG_API_KEY }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -196,14 +247,10 @@ jobs:
           mv ${{ matrix.artifact_name }}.tar.gz ${{ github.workspace }}/
 
       - name: Upload Release Asset
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        uses: softprops/action-gh-release@v2
         with:
-          upload_url: ${{ needs.create-release.outputs.upload_url }}
-          asset_path: ./${{ matrix.artifact_name }}.tar.gz
-          asset_name: ${{ matrix.artifact_name }}.tar.gz
-          asset_content_type: application/gzip
+          tag_name: v${{ needs.create-release.outputs.version }}
+          files: ./${{ matrix.artifact_name }}.tar.gz
 
   build-ai-tools:
     needs: create-release
@@ -220,11 +267,7 @@ jobs:
           tar czf gfs-ai-tools-${{ needs.create-release.outputs.version }}.tar.gz skills agents
 
       - name: Upload AI tools Release Asset
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        uses: softprops/action-gh-release@v2
         with:
-          upload_url: ${{ needs.create-release.outputs.upload_url }}
-          asset_path: ./gfs-ai-tools-${{ needs.create-release.outputs.version }}.tar.gz
-          asset_name: gfs-ai-tools-${{ needs.create-release.outputs.version }}.tar.gz
-          asset_content_type: application/gzip
+          tag_name: v${{ needs.create-release.outputs.version }}
+          files: ./gfs-ai-tools-${{ needs.create-release.outputs.version }}.tar.gz

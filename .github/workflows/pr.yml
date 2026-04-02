@@ -1,3 +1,5 @@
+# PR workflow runs only after a repo admin approves the run.
+# Configure: Settings → Environments → "pr-validation" → Required reviewers (e.g. admins or a team).
 name: PR Build and Test
 
 on:
@@ -7,7 +9,12 @@ on:
 
 jobs:
   build-and-test:
-    runs-on: ubuntu-latest
+    environment: pr-validation
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
 
@@ -17,14 +24,10 @@ jobs:
       - name: Cache cargo registry
         uses: actions/cache@v5
         with:
-          path: ~/.cargo/registry
-          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Cache cargo index
-        uses: actions/cache@v5
-        with:
-          path: ~/.cargo/git
-          key: ${{ runner.os }}-cargo-git-${{ hashFiles('**/Cargo.lock') }}
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Cache cargo build
         uses: actions/cache@v5
@@ -35,11 +38,13 @@ jobs:
       - name: Build
         run: cargo build --verbose
 
-      - name: Run tests
-        run: cargo test --verbose
-
       - name: Run clippy
+        if: matrix.os == 'ubuntu-latest'
         run: cargo clippy --all-targets --all-features -- -D warnings
 
       - name: Check formatting
+        if: matrix.os == 'ubuntu-latest'
         run: cargo fmt -- --check
+
+      - name: Run tests
+        run: cargo test --verbose

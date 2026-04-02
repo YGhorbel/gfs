@@ -8,6 +8,10 @@ on:
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
+    env:
+      # Embedded at compile time by option_env!() in gfs-telemetry.
+      # Store as a repository secret (Settings → Secrets) so it is masked in logs.
+      GFS_POSTHOG_API_KEY: ${{ secrets.GFS_POSTHOG_API_KEY }}
     steps:
       - uses: actions/checkout@v6
 

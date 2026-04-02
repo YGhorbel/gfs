@@ -1,5 +1,6 @@
 //! Helpers for current user identification.
 
+#[cfg(unix)]
 use std::process::Command;
 
 #[cfg(unix)]

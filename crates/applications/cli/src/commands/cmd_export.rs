@@ -13,15 +13,15 @@ use crate::output::{cyan, green};
 
 pub async fn run(
     path: Option<PathBuf>,
-    output_dir: PathBuf,
+    output_dir: Option<PathBuf>,
     format: String,
     id: Option<String>,
 ) -> Result<()> {
     let repo_path = path.unwrap_or_else(get_repo_dir);
 
-    let compute = Arc::new(
-        DockerCompute::new().context("failed to connect to Docker daemon (is Docker running?)")?,
-    );
+    let compute = Arc::new(DockerCompute::new().context(
+        "failed to connect to Docker/Podman daemon (is your container runtime running?)",
+    )?);
 
     // If --id is given, we need to override the container name in the config.
     // The use case loads it from config; for --id override we create a temporary wrapper.

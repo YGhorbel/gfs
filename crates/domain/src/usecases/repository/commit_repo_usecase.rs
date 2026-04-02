@@ -4,6 +4,7 @@ use std::sync::Arc;
 use thiserror::Error;
 
 use crate::model::commit::NewCommit;
+use crate::model::config::GlobalSettings;
 use crate::ports::compute::{Compute, ComputeError, InstanceId, InstanceState};
 use crate::ports::database_provider::{ConnectionParams, DatabaseProviderRegistry};
 use crate::ports::repository::{Repository, RepositoryError};
@@ -100,18 +101,46 @@ impl<R: DatabaseProviderRegistry> CommitRepoUseCase<R> {
         let environment = self.repository.get_environment_config(&path).await?;
         let mount_point = self.repository.get_mount_point(&path).await?;
 
-        // Use user config as fallback for author / committer.
+        // Resolve author / committer with fallback chain:
+        //   CLI args → repo-local config → global ~/.gfs/config.toml → git config → "user"
         let user_config = self.repository.get_user_config(&path).await?;
+        let global_config = GlobalSettings::load();
+        let git_config = repo_layout::get_git_user_config();
+
         let resolved_author = author
             .or_else(|| user_config.as_ref().and_then(|u| u.name.clone()))
+            .or_else(|| {
+                global_config
+                    .as_ref()
+                    .and_then(|g| g.user.as_ref().and_then(|u| u.name.clone()))
+            })
+            .or_else(|| git_config.name.clone())
             .unwrap_or_else(|| "user".to_string());
-        let resolved_author_email =
-            author_email.or_else(|| user_config.as_ref().and_then(|u| u.email.clone()));
+        let resolved_author_email = author_email
+            .or_else(|| user_config.as_ref().and_then(|u| u.email.clone()))
+            .or_else(|| {
+                global_config
+                    .as_ref()
+                    .and_then(|g| g.user.as_ref().and_then(|u| u.email.clone()))
+            })
+            .or_else(|| git_config.email.clone());
         let resolved_committer = committer
             .or_else(|| user_config.as_ref().and_then(|u| u.name.clone()))
+            .or_else(|| {
+                global_config
+                    .as_ref()
+                    .and_then(|g| g.user.as_ref().and_then(|u| u.name.clone()))
+            })
+            .or_else(|| git_config.name.clone())
             .unwrap_or_else(|| "user".to_string());
-        let resolved_committer_email =
-            committer_email.or_else(|| user_config.as_ref().and_then(|u| u.email.clone()));
+        let resolved_committer_email = committer_email
+            .or_else(|| user_config.as_ref().and_then(|u| u.email.clone()))
+            .or_else(|| {
+                global_config
+                    .as_ref()
+                    .and_then(|g| g.user.as_ref().and_then(|u| u.email.clone()))
+            })
+            .or_else(|| git_config.email.clone());
 
         // 2. Extract and store schema (best-effort) while the container is still running.
         //    Must run before pausing, since schema extraction requires a live database connection.
@@ -236,13 +265,20 @@ impl<R: DatabaseProviderRegistry> CommitRepoUseCase<R> {
 
         // 2. Export schema DDL using ExportRepoUseCase with "schema" format.
         let export_use_case = ExportRepoUseCase::new(self.compute.clone(), self.registry.clone());
-        let temp_dir = std::env::temp_dir().join(format!(
+        let temp_dir = repo_path.join(".gfs").join("tmp").join(format!(
             "gfs-schema-{}-{}",
             std::process::id(),
             chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
         ));
+        std::fs::create_dir_all(temp_dir.parent().unwrap()).map_err(|e| {
+            tracing::warn!("Failed to create temp directory: {}", e);
+            Box::new(std::io::Error::other(format!(
+                "cannot create temp directory: {}",
+                e
+            ))) as Box<dyn std::error::Error>
+        })?;
         let export_output = export_use_case
-            .run(repo_path, temp_dir.clone(), "schema")
+            .run(repo_path, Some(temp_dir.clone()), "schema")
             .await
             .map_err(|e| {
                 tracing::warn!("Schema DDL export failed: {}", e);
@@ -868,6 +904,7 @@ mod tests {
             environment: Some(EnvironmentConfig {
                 database_provider: "mock-db".into(),
                 database_version: "16".into(),
+                database_port: None,
             }),
             ..Default::default()
         };

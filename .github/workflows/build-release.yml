@@ -43,6 +43,9 @@ jobs:
             archive_name: gfs-windows-x86_64.tar.gz
 
     runs-on: ${{ matrix.os }}
+    env:
+      # Embedded at compile time by option_env!() in gfs-telemetry.
+      GFS_POSTHOG_API_KEY: ${{ secrets.GFS_POSTHOG_API_KEY }}
     steps:
       - uses: actions/checkout@v6
 
@@ -150,6 +153,66 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Generate changelog from conventional commits
+        id: changelog
+        run: |
+          # Find the previous tag
+          PREVIOUS_TAG=$(git tag --sort=-v:refname | grep '^v' | sed -n '2p')
+
+          if [ -z "$PREVIOUS_TAG" ]; then
+            # First release — include all commits
+            RANGE="HEAD"
+          else
+            RANGE="${PREVIOUS_TAG}..HEAD"
+          fi
+
+          # Collect commits by category
+          FEATURES=$(git log "$RANGE" --pretty=format:"- %s (%h)" --grep="^feat" --no-merges)
+          FIXES=$(git log "$RANGE" --pretty=format:"- %s (%h)" --grep="^fix" --no-merges)
+          PERF=$(git log "$RANGE" --pretty=format:"- %s (%h)" --grep="^perf" --no-merges)
+          DOCS=$(git log "$RANGE" --pretty=format:"- %s (%h)" --grep="^docs" --no-merges)
+          REFACTOR=$(git log "$RANGE" --pretty=format:"- %s (%h)" --grep="^refactor" --no-merges)
+          CHORE=$(git log "$RANGE" --pretty=format:"- %s (%h)" --grep="^chore" --no-merges)
+          CI=$(git log "$RANGE" --pretty=format:"- %s (%h)" --grep="^ci" --no-merges)
+
+          # Build changelog body
+          CHANGELOG=""
+
+          if [ -n "$FEATURES" ]; then
+            CHANGELOG="${CHANGELOG}### 🚀 Features\n\n${FEATURES}\n\n"
+          fi
+          if [ -n "$FIXES" ]; then
+            CHANGELOG="${CHANGELOG}### 🐛 Bug Fixes\n\n${FIXES}\n\n"
+          fi
+          if [ -n "$PERF" ]; then
+            CHANGELOG="${CHANGELOG}### ⚡ Performance\n\n${PERF}\n\n"
+          fi
+          if [ -n "$DOCS" ]; then
+            CHANGELOG="${CHANGELOG}### 📚 Documentation\n\n${DOCS}\n\n"
+          fi
+          if [ -n "$REFACTOR" ]; then
+            CHANGELOG="${CHANGELOG}### ♻️ Refactoring\n\n${REFACTOR}\n\n"
+          fi
+          if [ -n "$CHORE" ]; then
+            CHANGELOG="${CHANGELOG}### 🔧 Chores\n\n${CHORE}\n\n"
+          fi
+          if [ -n "$CI" ]; then
+            CHANGELOG="${CHANGELOG}### 👷 CI\n\n${CI}\n\n"
+          fi
+
+          if [ -z "$CHANGELOG" ]; then
+            CHANGELOG="No conventional commits found in this release.\n"
+          fi
+
+          # Write to file to preserve multiline content
+          echo -e "$CHANGELOG" > changelog.md
+
+          if [ -n "$PREVIOUS_TAG" ]; then
+            echo "**Full Changelog**: https://github.com/${{ github.repository }}/compare/${PREVIOUS_TAG}...${{ github.ref_name }}" >> changelog.md
+          fi
 
       - name: Download all artifacts
         uses: actions/download-artifact@v8
@@ -166,35 +229,5 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: release_assets/*
-          body: |
-            ## Binaries
-
-            Download the appropriate binary for your platform below.
-
-            ### Checksums
-
-            Verify the integrity of downloaded files using the `.sha256` files.
-
-            ```bash
-            sha256sum -c *.sha256
-            ```
-
-            ### Supported Platforms
-
-            - **Linux x86_64**: `gfs-linux-x64.tar.gz`
-            - **macOS x86_64**: `gfs-darwin-x64.zip`
-            - **macOS ARM64**: `gfs-darwin-arm64.zip`
-            - **Windows x86_64**: `gfs-windows-x86_64.tar.gz`
-
-            ### AI Tools (Cursor, Claude, OpenCode)
-
-            The `gfs-ai-tools-*.tar.gz` asset contains skills and agents for AI coding tools. The installer script injects these automatically when Cursor, Claude, or OpenCode are detected.
-
-            ### Installation
-
-            Extract the binary and add it to your PATH, or use the installer script:
-
-            ```bash
-            curl -fsSL https://github.com/Guepard-Corp/gfs/releases/download/${{ github.ref_name }}/gfs-<platform>.tar.gz | tar xz
-            ```
+          body_path: changelog.md
           draft: false

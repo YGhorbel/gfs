@@ -3,7 +3,9 @@ use std::sync::Arc;
 
 use thiserror::Error;
 
-use crate::utils::{current_user, data_dir};
+#[cfg(unix)]
+use crate::utils::current_user;
+use crate::utils::data_dir;
 
 use crate::model::config::{EnvironmentConfig, RuntimeConfig};
 use crate::ports::compute::{Compute, ComputeError, StartOptions};
@@ -65,6 +67,7 @@ impl<R: DatabaseProviderRegistry> InitRepositoryUseCase<R> {
         mount_point: Option<String>,
         database_provider: Option<String>,
         database_version: Option<String>,
+        database_port: Option<u16>,
     ) -> std::result::Result<(), InitRepoError> {
         self.repository.init(&path, mount_point).await?;
 
@@ -72,7 +75,8 @@ impl<R: DatabaseProviderRegistry> InitRepositoryUseCase<R> {
             let version = database_version
                 .filter(|v| !v.is_empty())
                 .ok_or(InitRepoError::DatabaseVersionRequired)?;
-            self.deploy_database(&path, provider, version).await?;
+            self.deploy_database(&path, provider, version, database_port)
+                .await?;
         }
 
         Ok(())
@@ -83,6 +87,7 @@ impl<R: DatabaseProviderRegistry> InitRepositoryUseCase<R> {
         repo_path: &std::path::Path,
         provider_name: String,
         database_version: String,
+        database_port: Option<u16>,
     ) -> std::result::Result<(), InitRepoError> {
         let compute = self.compute.as_ref().ok_or_else(|| {
             InitRepoError::Compute(ComputeError::Internal(
@@ -114,6 +119,14 @@ impl<R: DatabaseProviderRegistry> InitRepositoryUseCase<R> {
             .unwrap_or(&definition.image);
         definition.image = format!("{}:{}", base, database_version);
 
+        if let Some(port) = database_port {
+            for mapping in &mut definition.ports {
+                if mapping.compute_port == provider.default_port() {
+                    mapping.host_port = Some(port);
+                }
+            }
+        }
+
         let workspace_data_dir = self
             .repository
             .get_workspace_data_dir_for_head(repo_path)
@@ -143,6 +156,7 @@ impl<R: DatabaseProviderRegistry> InitRepositoryUseCase<R> {
         let environment = EnvironmentConfig {
             database_provider: provider_name,
             database_version,
+            database_port,
         };
         self.repository
             .update_environment_config(repo_path, environment)
@@ -175,6 +189,7 @@ mod tests {
 
     use async_trait::async_trait;
 
+    use crate::adapters::gfs_repository::GfsRepository;
     use crate::model::config::{EnvironmentConfig, RuntimeConfig};
     use crate::ports::compute::{
         Compute, ComputeDefinition, InstanceId, InstanceState, InstanceStatus, StartOptions,
@@ -183,7 +198,7 @@ mod tests {
         ConnectionParams, DatabaseProvider, DatabaseProviderArg, DatabaseProviderRegistry,
         ProviderError, Result as RegistryResult, SIGTERM, SupportedFeature,
     };
-    use crate::ports::repository::Repository;
+    use crate::ports::repository::{Repository, RepositoryError};
 
     struct MockRepository;
 
@@ -538,7 +553,7 @@ mod tests {
             InitRepositoryUseCase::new(Arc::new(MockRepository), None, Arc::new(MockRegistry));
         let dir = tempfile::tempdir().unwrap();
         let result = usecase
-            .run(dir.path().to_path_buf(), None, None, None)
+            .run(dir.path().to_path_buf(), None, None, None, None)
             .await;
         assert!(result.is_ok());
     }
@@ -557,6 +572,7 @@ mod tests {
                 None,
                 Some("postgres".into()),
                 Some("17".into()),
+                None,
             )
             .await;
         assert!(result.is_ok());
@@ -575,6 +591,7 @@ mod tests {
                 dir.path().to_path_buf(),
                 None,
                 Some("postgres".into()),
+                None,
                 None,
             )
             .await;
@@ -598,11 +615,40 @@ mod tests {
                 None,
                 Some("mysql".into()),
                 Some("8".into()),
+                None,
             )
             .await;
         assert!(matches!(
             result,
             Err(InitRepoError::UnknownDatabaseProvider(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn init_fails_when_repository_already_initialized() {
+        let usecase = InitRepositoryUseCase::new(
+            Arc::new(GfsRepository::new()),
+            Arc::new(MockCompute),
+            Arc::new(MockRegistry),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_path_buf();
+
+        // First init succeeds
+        let first = usecase.run(path.clone(), None, None, None, None).await;
+        assert!(first.is_ok(), "first init should succeed: {:?}", first);
+
+        // Second init fails with AlreadyInitialized
+        let second = usecase.run(path, None, None, None, None).await;
+        assert!(
+            matches!(
+                second,
+                Err(InitRepoError::Repository(
+                    RepositoryError::AlreadyInitialized(_)
+                ))
+            ),
+            "second init should fail with AlreadyInitialized: {:?}",
+            second
+        );
     }
 }

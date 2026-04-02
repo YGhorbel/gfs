@@ -75,15 +75,62 @@ impl<R: DatabaseProviderRegistry> ExportRepoUseCase<R> {
     ///
     /// - `path`: GFS repository root.
     /// - `output_dir`: host directory where the export file will be written (created if absent).
+    ///   If `None`, defaults to `.gfs/exports/` within the repository.
     /// - `format`: export format identifier (e.g. `"sql"`, `"custom"`).
     pub async fn run(
         &self,
         path: &Path,
-        output_dir: PathBuf,
+        output_dir: Option<PathBuf>,
         format: &str,
     ) -> Result<ExportOutput, ExportRepoError> {
         // 1. Load repo config.
         let config = GfsConfig::load(path).map_err(|e| ExportRepoError::Config(e.to_string()))?;
+
+        // Resolve output directory: use provided path or default to .gfs/exports/
+        let output_dir = if let Some(dir) = output_dir {
+            // Validate that the output directory is within the repository (security)
+            let canonical_path = std::fs::canonicalize(path).map_err(|e| {
+                ExportRepoError::Config(format!("cannot canonicalize repo path: {e}"))
+            })?;
+
+            // Resolve output directory relative to repo
+            let resolved_output = if dir.is_absolute() {
+                dir.clone()
+            } else {
+                path.join(&dir)
+            };
+
+            // Validate: canonicalize if exists, otherwise validate path structure
+            if resolved_output.exists() {
+                let canonical_output = std::fs::canonicalize(&resolved_output).map_err(|e| {
+                    ExportRepoError::Config(format!("cannot canonicalize output dir: {e}"))
+                })?;
+                if !canonical_output.starts_with(&canonical_path) {
+                    return Err(ExportRepoError::Config(format!(
+                        "output directory must be within repository: {}",
+                        dir.display()
+                    )));
+                }
+            } else {
+                // For non-existent paths the path can't be canonicalized directly.
+                // Canonicalize the nearest existing ancestor (usually the repo root itself)
+                // to resolve symlinks (e.g. /tmp → /private/tmp on macOS) before comparing.
+                let canonical_output = resolved_output
+                    .parent()
+                    .and_then(|p| std::fs::canonicalize(p).ok())
+                    .map(|p| p.join(resolved_output.file_name().unwrap_or_default()))
+                    .unwrap_or(resolved_output.clone());
+                if !canonical_output.starts_with(&canonical_path) {
+                    return Err(ExportRepoError::Config(format!(
+                        "output directory must be within repository: {}",
+                        dir.display()
+                    )));
+                }
+            }
+            dir
+        } else {
+            path.join(".gfs").join("exports")
+        };
 
         let provider_name = config
             .environment
@@ -438,6 +485,7 @@ mod tests {
         let env = EnvironmentConfig {
             database_provider: "postgres".into(),
             database_version: "17".into(),
+            database_port: None,
         };
         let runtime = RuntimeConfig {
             runtime_provider: "docker".into(),
@@ -451,7 +499,9 @@ mod tests {
             Arc::new(MockRegistry),
         );
         let output_dir = dir.path().join("export_out");
-        let result = usecase.run(dir.path(), output_dir.clone(), "sql").await;
+        let result = usecase
+            .run(dir.path(), Some(output_dir.clone()), "sql")
+            .await;
         assert!(result.is_ok());
         let output = result.unwrap();
         assert_eq!(output.format, "sql");
@@ -464,6 +514,7 @@ mod tests {
         let env = EnvironmentConfig {
             database_provider: "postgres".into(),
             database_version: "17".into(),
+            database_port: None,
         };
         let runtime = RuntimeConfig {
             runtime_provider: "docker".into(),
@@ -477,7 +528,7 @@ mod tests {
             Arc::new(MockRegistry),
         );
         let output_dir = dir.path().join("export_out");
-        let result = usecase.run(dir.path(), output_dir, "sql").await;
+        let result = usecase.run(dir.path(), Some(output_dir), "sql").await;
         assert!(matches!(result, Err(ExportRepoError::TaskFailed { .. })));
     }
 
@@ -504,7 +555,7 @@ mod tests {
             Arc::new(MockRegistry),
         );
         let result = usecase
-            .run(dir.path(), dir.path().to_path_buf(), "sql")
+            .run(dir.path(), Some(dir.path().to_path_buf()), "sql")
             .await;
         assert!(matches!(result, Err(ExportRepoError::NotConfigured(_))));
     }
@@ -521,6 +572,7 @@ mod tests {
             environment: Some(EnvironmentConfig {
                 database_provider: "postgres".into(),
                 database_version: "17".into(),
+                database_port: None,
             }),
             runtime: Some(RuntimeConfig {
                 runtime_provider: "docker".into(),
@@ -535,7 +587,7 @@ mod tests {
             Arc::new(MockRegistry),
         );
         let result = usecase
-            .run(dir.path(), dir.path().to_path_buf(), "sql")
+            .run(dir.path(), Some(dir.path().to_path_buf()), "sql")
             .await;
         assert!(matches!(result, Err(ExportRepoError::NotConfigured(_))));
     }
@@ -546,6 +598,7 @@ mod tests {
         let env = EnvironmentConfig {
             database_provider: "mysql".into(),
             database_version: "8".into(),
+            database_port: None,
         };
         let runtime = RuntimeConfig {
             runtime_provider: "docker".into(),
@@ -559,7 +612,7 @@ mod tests {
             Arc::new(MockRegistry),
         );
         let result = usecase
-            .run(dir.path(), dir.path().to_path_buf(), "sql")
+            .run(dir.path(), Some(dir.path().to_path_buf()), "sql")
             .await;
         assert!(matches!(result, Err(ExportRepoError::ProviderNotFound(_))));
     }
@@ -570,6 +623,7 @@ mod tests {
         let env = EnvironmentConfig {
             database_provider: "postgres".into(),
             database_version: "17".into(),
+            database_port: None,
         };
         let runtime = RuntimeConfig {
             runtime_provider: "docker".into(),
@@ -583,7 +637,7 @@ mod tests {
             Arc::new(MockRegistry),
         );
         let result = usecase
-            .run(dir.path(), dir.path().to_path_buf(), "custom")
+            .run(dir.path(), Some(dir.path().to_path_buf()), "custom")
             .await;
         assert!(matches!(result, Err(ExportRepoError::UnsupportedFormat(_))));
     }

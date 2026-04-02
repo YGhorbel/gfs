@@ -24,9 +24,9 @@ pub async fn run_extract(
 ) -> Result<()> {
     let repo_path = path.unwrap_or_else(get_repo_dir);
 
-    let compute = Arc::new(
-        DockerCompute::new().context("failed to connect to Docker daemon (is Docker running?)")?,
-    );
+    let compute = Arc::new(DockerCompute::new().context(
+        "failed to connect to Docker/Podman daemon (is your container runtime running?)",
+    )?);
 
     let registry = Arc::new(InMemoryDatabaseProviderRegistry::new());
     gfs_compute_docker::containers::register_all(registry.as_ref())
@@ -119,7 +119,7 @@ pub async fn run_show(
     Ok(())
 }
 
-/// Compare schemas between two commits.
+/// Compare schemas between two commits. Returns the exit code to use (0, 1, or 2).
 pub async fn run_diff(
     commit1: String,
     commit2: String,
@@ -127,7 +127,7 @@ pub async fn run_diff(
     pretty: bool,
     json: bool,
     no_color: bool,
-) -> Result<()> {
+) -> Result<i32> {
     // Check for mutual exclusivity
     if pretty && json {
         return Err(anyhow!("--pretty and --json cannot be used together"));
@@ -176,6 +176,5 @@ pub async fn run_diff(
 
     println!("{}", output);
 
-    // Exit with appropriate code
-    std::process::exit(diff.exit_code());
+    Ok(diff.exit_code())
 }

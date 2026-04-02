@@ -71,11 +71,7 @@ pub fn init_repo_layout(working_dir: &Path, mount_point: Option<String>) -> Resu
 
     if gfs_dir.exists() {
         validate_repo_layout(&gfs_dir)?;
-        tracing::info!("Using existing .gfs directory at {}", gfs_dir.display());
-        if let Some(mount_point) = mount_point {
-            update_project_mount_point(working_dir, mount_point)?;
-        }
-        return Ok(());
+        return Err(RepoError::already_initialized(gfs_dir));
     }
 
     tracing::info!(
@@ -260,6 +256,33 @@ pub fn get_environment_config(repo_path: &Path) -> Result<Option<EnvironmentConf
 pub fn get_user_config(repo_path: &Path) -> Result<Option<UserConfig>, RepoError> {
     let config = GfsConfig::load(repo_path)?;
     Ok(config.user)
+}
+
+/// Read user identity from `git config` (local → global → system).
+/// Returns a `UserConfig` whose fields are `None` when git is unavailable
+/// or no value is configured.
+pub fn get_git_user_config() -> UserConfig {
+    UserConfig {
+        name: run_git_config("user.name"),
+        email: run_git_config("user.email"),
+    }
+}
+
+fn run_git_config(key: &str) -> Option<String> {
+    std::process::Command::new("git")
+        .args(["config", key])
+        .output()
+        .ok()
+        .and_then(|o| {
+            if o.status.success() {
+                String::from_utf8(o.stdout)
+                    .ok()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+            } else {
+                None
+            }
+        })
 }
 
 /// Create `.gfs/snapshots/<first 2 chars of hash>/<remaining 62 chars>/` and
@@ -1239,6 +1262,16 @@ name = "test-repo"
 
         let result = get_current_branch(&repo_dir).unwrap();
         assert!(result == MAIN_BRANCH);
+    }
+
+    #[test]
+    fn init_repo_layout_fails_when_already_initialized() {
+        let temp_dir = TempDir::new().unwrap();
+        let repo_dir = temp_dir.path().join("repo");
+        init_repo_layout(&repo_dir, None).unwrap();
+
+        let result = init_repo_layout(&repo_dir, None);
+        assert!(matches!(result, Err(RepoError::AlreadyInitialized(_))));
     }
 
     #[test]
