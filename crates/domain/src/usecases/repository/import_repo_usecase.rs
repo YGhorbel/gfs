@@ -74,6 +74,25 @@ pub fn format_from_extension(path: &Path) -> Option<&'static str> {
     }
 }
 
+/// Infer a format identifier from the path, allowing provider-specific compound extensions.
+pub fn format_from_path(path: &Path, provider_name: &str) -> Option<&'static str> {
+    let filename = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+
+    if provider_name.eq_ignore_ascii_case("clickhouse") {
+        if filename.ends_with(".sql.gz") {
+            return Some("sql");
+        }
+        if filename.ends_with(".csv.gz") {
+            return Some("csv");
+        }
+    }
+
+    format_from_extension(path)
+}
+
 // ---------------------------------------------------------------------------
 // Use case
 // ---------------------------------------------------------------------------
@@ -112,19 +131,6 @@ impl<R: DatabaseProviderRegistry> ImportRepoUseCase<R> {
             ));
         }
 
-        // Determine format (explicit or inferred from extension).
-        let resolved_format = if format.is_empty() {
-            format_from_extension(&input_file)
-                .ok_or_else(|| {
-                    ImportRepoError::UnsupportedFormat(
-                        "cannot infer format from file extension; pass --format explicitly".into(),
-                    )
-                })?
-                .to_string()
-        } else {
-            format.to_string()
-        };
-
         // 1. Load repo config.
         let config = GfsConfig::load(path).map_err(|e| ImportRepoError::Config(e.to_string()))?;
 
@@ -140,6 +146,19 @@ impl<R: DatabaseProviderRegistry> ImportRepoUseCase<R> {
                 )
             })?
             .to_string();
+
+        // Determine format (explicit or inferred from extension).
+        let resolved_format = if format.is_empty() {
+            format_from_path(&input_file, &provider_name)
+                .ok_or_else(|| {
+                    ImportRepoError::UnsupportedFormat(
+                        "cannot infer format from file extension; pass --format explicitly".into(),
+                    )
+                })?
+                .to_string()
+        } else {
+            format.to_string()
+        };
 
         let container_name = config
             .runtime
@@ -258,6 +277,27 @@ mod tests {
     fn format_from_extension_unknown() {
         assert_eq!(format_from_extension(Path::new("file.txt")), None);
         assert_eq!(format_from_extension(Path::new("noext")), None);
+    }
+
+    #[test]
+    fn format_from_path_clickhouse_csv_gz() {
+        assert_eq!(
+            format_from_path(Path::new("sample_stories.csv.gz"), "clickhouse"),
+            Some("csv")
+        );
+    }
+
+    #[test]
+    fn format_from_path_clickhouse_sql_gz() {
+        assert_eq!(
+            format_from_path(Path::new("seed.sql.gz"), "clickhouse"),
+            Some("sql")
+        );
+    }
+
+    #[test]
+    fn format_from_path_other_provider_does_not_assume_gzip_support() {
+        assert_eq!(format_from_path(Path::new("data.csv.gz"), "postgres"), None);
     }
 
     struct MockCompute {

@@ -6,7 +6,7 @@ use std::sync::Arc;
 use gfs_domain::ports::compute::{ComputeDefinition, EnvVar, PortMapping};
 use gfs_domain::ports::database_provider::{
     ConnectionParams, DataFormat, DatabaseProvider, DatabaseProviderArg, DatabaseProviderRegistry,
-    ExportSpec, ProviderError, Result, SIGTERM, SchemaExtractionSpec, SupportedFeature,
+    ExportSpec, ImportSpec, ProviderError, Result, SIGTERM, SchemaExtractionSpec, SupportedFeature,
 };
 
 const NAME: &str = "clickhouse";
@@ -85,6 +85,53 @@ impl ClickhouseProvider {
     fn database(params: &ConnectionParams) -> &str {
         params.get_env(ENV_DB).unwrap_or(DEFAULT_DB)
     }
+
+    fn import_table_name(input_filename: &str) -> String {
+        let mut stem = input_filename;
+        if let Some(stripped) = stem.strip_suffix(".gz") {
+            stem = stripped;
+        }
+        if let Some(stripped) = stem.strip_suffix(".csv") {
+            stem = stripped;
+        } else if let Some(stripped) = stem.strip_suffix(".sql") {
+            stem = stripped;
+        }
+
+        let mut table = String::new();
+        let mut previous_was_underscore = false;
+        for ch in stem.chars() {
+            let mapped = if ch.is_ascii_alphanumeric() || ch == '_' {
+                ch.to_ascii_lowercase()
+            } else {
+                '_'
+            };
+
+            if mapped == '_' {
+                if !table.is_empty() && !previous_was_underscore {
+                    table.push('_');
+                }
+                previous_was_underscore = true;
+            } else {
+                table.push(mapped);
+                previous_was_underscore = false;
+            }
+        }
+
+        let table = table.trim_matches('_');
+        if table.is_empty() {
+            return "import_data".to_string();
+        }
+
+        if table
+            .as_bytes()
+            .first()
+            .is_some_and(|first| first.is_ascii_digit())
+        {
+            return format!("import_{table}");
+        }
+
+        table.to_string()
+    }
 }
 
 impl Default for ClickhouseProvider {
@@ -133,10 +180,16 @@ impl DatabaseProvider for ClickhouseProvider {
     }
 
     fn supported_features(&self) -> Vec<SupportedFeature> {
-        vec![SupportedFeature {
-            id: "schema".into(),
-            description: "Schema extraction and schema-aware history.".into(),
-        }]
+        vec![
+            SupportedFeature {
+                id: "schema".into(),
+                description: "Schema extraction and schema-aware history.".into(),
+            },
+            SupportedFeature {
+                id: "import".into(),
+                description: "Import SQL, CSV, and CSV.GZ files into ClickHouse.".into(),
+            },
+        ]
     }
 
     fn prepare_for_snapshot(&self, _params: &ConnectionParams) -> Result<Vec<String>> {
@@ -151,6 +204,21 @@ impl DatabaseProvider for ClickhouseProvider {
             description: "Schema-only DDL export from system catalogs.".into(),
             file_extension: ".sql".into(),
         }]
+    }
+
+    fn supported_import_formats(&self) -> Vec<DataFormat> {
+        vec![
+            DataFormat {
+                id: "sql".into(),
+                description: "Plain-text SQL file (loaded via clickhouse-client).".into(),
+                file_extension: ".sql".into(),
+            },
+            DataFormat {
+                id: "csv".into(),
+                description: "CSV or CSV.GZ file with header row (loaded into a table derived from the filename).".into(),
+                file_extension: ".csv".into(),
+            },
+        ]
     }
 
     fn export_spec(
@@ -220,6 +288,149 @@ done"#,
             },
             command,
             output_filename: "schema.sql".into(),
+        })
+    }
+
+    fn import_spec(
+        &self,
+        params: &ConnectionParams,
+        format: &str,
+        input_filename: &str,
+    ) -> std::result::Result<ImportSpec, ProviderError> {
+        let user = Self::user(params);
+        let password = Self::password(params);
+        let db = Self::database(params);
+
+        let command = match format {
+            "sql" => {
+                if input_filename.ends_with(".gz") {
+                    format!(
+                        r#"set -eu
+
+file="/data/{file}"
+
+wait_for_clickhouse() {{
+    tries=20
+    while [ "$tries" -gt 0 ]; do
+        if CLICKHOUSE_USER="{user}" CLICKHOUSE_PASSWORD="{password}" clickhouse-client --host {host} --port {port} --database {db} --query "SELECT 1" >/dev/null 2>&1; then
+            return 0
+        fi
+        tries=$((tries - 1))
+        if [ "$tries" -eq 0 ]; then
+            printf '%s\n' "ClickHouse was not ready for import" >&2
+            return 1
+        fi
+        sleep 1
+    done
+}}
+
+wait_for_clickhouse
+gzip -dc "$file" | CLICKHOUSE_USER="{user}" CLICKHOUSE_PASSWORD="{password}" clickhouse-client --host {host} --port {port} --database {db} --multiquery"#,
+                        file = input_filename,
+                        user = user,
+                        password = password,
+                        host = params.host,
+                        port = params.port,
+                        db = db,
+                    )
+                } else {
+                    format!(
+                        r#"set -eu
+
+file="/data/{file}"
+
+wait_for_clickhouse() {{
+    tries=20
+    while [ "$tries" -gt 0 ]; do
+        if CLICKHOUSE_USER="{user}" CLICKHOUSE_PASSWORD="{password}" clickhouse-client --host {host} --port {port} --database {db} --query "SELECT 1" >/dev/null 2>&1; then
+            return 0
+        fi
+        tries=$((tries - 1))
+        if [ "$tries" -eq 0 ]; then
+            printf '%s\n' "ClickHouse was not ready for import" >&2
+            return 1
+        fi
+        sleep 1
+    done
+}}
+
+wait_for_clickhouse
+CLICKHOUSE_USER="{user}" CLICKHOUSE_PASSWORD="{password}" clickhouse-client --host {host} --port {port} --database {db} --multiquery < "$file""#,
+                        file = input_filename,
+                        user = user,
+                        password = password,
+                        host = params.host,
+                        port = params.port,
+                        db = db,
+                    )
+                }
+            }
+            "csv" => {
+                let table = Self::import_table_name(input_filename);
+                format!(
+                    r#"set -eu
+
+file="/data/{file}"
+table="{table}"
+
+wait_for_clickhouse() {{
+    tries=20
+    while [ "$tries" -gt 0 ]; do
+        if CLICKHOUSE_USER="{user}" CLICKHOUSE_PASSWORD="{password}" clickhouse-client --host {host} --port {port} --database {db} --query "SELECT 1" >/dev/null 2>&1; then
+            return 0
+        fi
+        tries=$((tries - 1))
+        if [ "$tries" -eq 0 ]; then
+            printf '%s\n' "ClickHouse was not ready for import" >&2
+            return 1
+        fi
+        sleep 1
+    done
+}}
+
+wait_for_clickhouse
+
+desc_query="DESCRIBE TABLE file('$file', CSVWithNames)"
+schema="$(clickhouse-local --query "$desc_query" | awk -F '\t' 'BEGIN {{ sep="" }} {{ printf "%s`%s` %s", sep, $1, $2; sep=", " }} END {{ print "" }}')"
+
+if [ -z "$schema" ]; then
+    printf '%s\n' "failed to infer ClickHouse schema from $file" >&2
+    exit 1
+fi
+
+CLICKHOUSE_USER="{user}" CLICKHOUSE_PASSWORD="{password}" clickhouse-client --host {host} --port {port} --database {db} --query "CREATE TABLE IF NOT EXISTS \`$table\` ($schema) ENGINE = MergeTree ORDER BY tuple()"
+
+if [ "${{file##*.}}" = "gz" ]; then
+    gzip -dc "$file" | CLICKHOUSE_USER="{user}" CLICKHOUSE_PASSWORD="{password}" clickhouse-client --host {host} --port {port} --database {db} --query "INSERT INTO \`$table\` FORMAT CSVWithNames"
+else
+    CLICKHOUSE_USER="{user}" CLICKHOUSE_PASSWORD="{password}" clickhouse-client --host {host} --port {port} --database {db} --query "INSERT INTO \`$table\` FORMAT CSVWithNames" < "$file"
+fi"#,
+                    file = input_filename,
+                    table = table,
+                    user = user,
+                    password = password,
+                    host = params.host,
+                    port = params.port,
+                    db = db,
+                )
+            }
+            other => return Err(ProviderError::UnsupportedFormat(other.to_string())),
+        };
+
+        Ok(ImportSpec {
+            definition: ComputeDefinition {
+                image: self.definition().image,
+                env: vec![],
+                ports: vec![],
+                data_dir: PathBuf::from("/data"),
+                host_data_dir: None,
+                user: None,
+                logs_dir: None,
+                conf_dir: None,
+                args: vec![],
+            },
+            command,
+            input_filename: input_filename.to_string(),
         })
     }
 
@@ -471,6 +682,31 @@ mod tests {
     }
 
     #[test]
+    fn supported_import_formats_include_sql_and_csv() {
+        let provider = ClickhouseProvider::new();
+        let formats = provider.supported_import_formats();
+        assert_eq!(formats.len(), 2);
+        assert_eq!(formats[0].id, "sql");
+        assert_eq!(formats[1].id, "csv");
+    }
+
+    #[test]
+    fn import_table_name_sanitizes_filename() {
+        assert_eq!(
+            ClickhouseProvider::import_table_name("sample_stories.csv.gz"),
+            "sample_stories"
+        );
+        assert_eq!(
+            ClickhouseProvider::import_table_name("2026 stories.csv"),
+            "import_2026_stories"
+        );
+        assert_eq!(
+            ClickhouseProvider::import_table_name("---.csv"),
+            "import_data"
+        );
+    }
+
+    #[test]
     fn export_spec_schema_produces_schema_sql() {
         let provider = ClickhouseProvider::new();
         let params = ConnectionParams {
@@ -495,6 +731,68 @@ mod tests {
         };
 
         let err = provider.export_spec(&params, "sql").unwrap_err();
+        assert!(matches!(err, ProviderError::UnsupportedFormat(_)));
+    }
+
+    #[test]
+    fn import_spec_sql_reads_file_via_clickhouse_client() {
+        let provider = ClickhouseProvider::new();
+        let params = ConnectionParams {
+            host: "db".to_string(),
+            port: 9000,
+            env: vec![],
+        };
+
+        let spec = provider.import_spec(&params, "sql", "seed.sql").unwrap();
+        assert_eq!(spec.input_filename, "seed.sql");
+        assert!(spec.command.contains("clickhouse-client"));
+        assert!(spec.command.contains("wait_for_clickhouse"));
+        assert!(spec.command.contains("file=\"/data/seed.sql\""));
+        assert!(spec.command.contains("--multiquery < \"$file\""));
+    }
+
+    #[test]
+    fn import_spec_csv_uses_schema_inference_and_filename_table() {
+        let provider = ClickhouseProvider::new();
+        let params = ConnectionParams {
+            host: "db".to_string(),
+            port: 9000,
+            env: vec![],
+        };
+
+        let spec = provider
+            .import_spec(&params, "csv", "sample_stories.csv.gz")
+            .unwrap();
+        assert_eq!(spec.input_filename, "sample_stories.csv.gz");
+        assert!(spec.command.contains("clickhouse-local"));
+        assert!(
+            spec.command
+                .contains("DESCRIBE TABLE file('$file', CSVWithNames)")
+        );
+        assert!(
+            spec.command
+                .contains(r"CREATE TABLE IF NOT EXISTS \`$table\`")
+        );
+        assert!(
+            spec.command
+                .contains(r"INSERT INTO \`$table\` FORMAT CSVWithNames")
+        );
+        assert!(spec.command.contains("table=\"sample_stories\""));
+        assert!(spec.command.contains("gzip -dc \"$file\""));
+    }
+
+    #[test]
+    fn import_spec_unsupported_format_returns_error() {
+        let provider = ClickhouseProvider::new();
+        let params = ConnectionParams {
+            host: "db".to_string(),
+            port: 9000,
+            env: vec![],
+        };
+
+        let err = provider
+            .import_spec(&params, "custom", "file.dump")
+            .unwrap_err();
         assert!(matches!(err, ProviderError::UnsupportedFormat(_)));
     }
 

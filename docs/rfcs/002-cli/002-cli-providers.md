@@ -9,7 +9,7 @@ List database providers and their supported versions in a scrollable table. The 
 | postgres | 13, 14, 15, 16, 17, 18 | tls, schema, masking, auto-scaling, performance-profile, backup, import, replication, ai-agents |
 | mysql | 8.0, 8.1 | tls, schema, masking, backup, import |
 | mariadb | 10.6, 10.11, 11.x | tls, schema, masking, backup, import |
-| clickhouse | 24.x, 25.x | tls, schema, backup, import |
+| clickhouse | 24.8.14.39 | schema, import |
 
 - **database_provider**: Identifier used in repo config (`environment.database_provider`).
 - **version**: Supported major/minor versions; the CLI and compute adapter use these when resolving the image tag (e.g. `postgres:16`).
