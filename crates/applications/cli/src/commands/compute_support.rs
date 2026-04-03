@@ -19,11 +19,18 @@ struct NoopCompute;
 
 #[async_trait]
 impl Compute for NoopCompute {
-    async fn provision(&self, _definition: &ComputeDefinition) -> gfs_domain::ports::compute::Result<InstanceId> {
+    async fn provision(
+        &self,
+        _definition: &ComputeDefinition,
+    ) -> gfs_domain::ports::compute::Result<InstanceId> {
         Err(missing_runtime_error())
     }
 
-    async fn start(&self, _id: &InstanceId, _options: StartOptions) -> gfs_domain::ports::compute::Result<InstanceStatus> {
+    async fn start(
+        &self,
+        _id: &InstanceId,
+        _options: StartOptions,
+    ) -> gfs_domain::ports::compute::Result<InstanceStatus> {
         Err(missing_runtime_error())
     }
 
@@ -31,7 +38,10 @@ impl Compute for NoopCompute {
         Err(missing_runtime_error())
     }
 
-    async fn restart(&self, _id: &InstanceId) -> gfs_domain::ports::compute::Result<InstanceStatus> {
+    async fn restart(
+        &self,
+        _id: &InstanceId,
+    ) -> gfs_domain::ports::compute::Result<InstanceStatus> {
         Err(missing_runtime_error())
     }
 
@@ -67,7 +77,10 @@ impl Compute for NoopCompute {
         Err(missing_runtime_error())
     }
 
-    async fn unpause(&self, _id: &InstanceId) -> gfs_domain::ports::compute::Result<InstanceStatus> {
+    async fn unpause(
+        &self,
+        _id: &InstanceId,
+    ) -> gfs_domain::ports::compute::Result<InstanceStatus> {
         Err(missing_runtime_error())
     }
 
