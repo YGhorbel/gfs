@@ -12,3 +12,4 @@ pub mod cmd_query;
 pub mod cmd_schema;
 pub mod cmd_status;
 pub mod cmd_version;
+mod compute_support;
