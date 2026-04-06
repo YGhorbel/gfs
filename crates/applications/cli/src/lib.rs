@@ -315,6 +315,14 @@ enum TopLevel {
         /// Show full 64-character commit hashes
         #[arg(long)]
         full_hash: bool,
+
+        /// Draw a text-based graph of the branch topology
+        #[arg(long)]
+        graph: bool,
+
+        /// Show commits from all branches (implies --graph)
+        #[arg(long)]
+        all: bool,
     },
 
     /// Show repository and compute status (current branch, container state, connection string)
@@ -559,8 +567,11 @@ where
                 from,
                 until,
                 full_hash,
+                graph,
+                all,
             } => {
-                commands::cmd_log::log(path, max_count, from, until, full_hash).await?;
+                commands::cmd_log::log(path, max_count, from, until, full_hash, graph, all)
+                    .await?;
                 Ok(0)
             }
             TopLevel::Status { path, output } => {
