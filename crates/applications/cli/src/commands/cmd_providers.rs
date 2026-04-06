@@ -8,8 +8,8 @@ use gfs_domain::ports::database_provider::{
 };
 
 use crate::output::{
-    TBL_BL, TBL_BR, TBL_T_DOWN, TBL_T_LEFT, TBL_T_RIGHT, TBL_T_UP, TBL_TL, TBL_TR, TBL_V, bold,
-    cyan, tbl_rule,
+    TBL_BL, TBL_BR, TBL_CROSS, TBL_T_DOWN, TBL_T_LEFT, TBL_T_RIGHT, TBL_T_UP, TBL_TL, TBL_TR,
+    TBL_V, bold, cyan, tbl_rule,
 };
 
 // ---------------------------------------------------------------------------
@@ -102,7 +102,7 @@ fn print_providers_table(rows: &[(String, String, String)]) {
     );
 
     // Separator: ├──────┼──────┼──────┤
-    println!("{}", tbl_rule(&cols, TBL_T_RIGHT, "┼", TBL_T_LEFT));
+    println!("{}", tbl_rule(&cols, TBL_T_RIGHT, TBL_CROSS, TBL_T_LEFT));
 
     // Data rows
     for (name, versions, features) in rows {
@@ -152,7 +152,7 @@ fn print_features_table(features: &[SupportedFeature]) {
     );
 
     // Separator
-    println!("{}", tbl_rule(&cols, TBL_T_RIGHT, "┼", TBL_T_LEFT));
+    println!("{}", tbl_rule(&cols, TBL_T_RIGHT, TBL_CROSS, TBL_T_LEFT));
 
     // Rows
     for f in features {
@@ -167,9 +167,12 @@ fn print_features_table(features: &[SupportedFeature]) {
 
 fn truncate(s: impl AsRef<str>, max_len: usize) -> String {
     let s = s.as_ref();
-    if s.len() <= max_len {
+    let char_len = s.chars().count();
+    if char_len <= max_len {
         s.to_string()
     } else {
-        format!("{}…", &s[..max_len.saturating_sub(1)])
+        let take = max_len.saturating_sub(1);
+        let prefix: String = s.chars().take(take).collect();
+        format!("{}…", prefix)
     }
 }

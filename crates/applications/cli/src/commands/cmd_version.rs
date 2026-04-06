@@ -15,7 +15,9 @@ pub fn run() {
     let h = "═";
     let v = "║";
 
-    let w: usize = 39; // inner visible width
+    let indent = "    ";
+    let tagline = "Git For database Systems";
+    let meta = format!("v{} · rust · {}", version, target);
 
     let art = [
         " ██████  ███████ ███████",
@@ -25,8 +27,16 @@ pub fn run() {
         " ██████  ██      ███████",
     ];
 
-    let tagline = "Git For database Systems";
-    let meta = format!("v{} · rust · {}", version, target);
+    let min_w: usize = 39;
+    let art_w = art
+        .iter()
+        .map(|line| indent.len() + line.chars().count())
+        .max()
+        .unwrap_or(0);
+    let w: usize = min_w
+        .max(indent.len() + tagline.chars().count())
+        .max(indent.len() + meta.chars().count())
+        .max(art_w);
 
     // Top border
     println!("  {}{}{}", tl, h.repeat(w + 2), tr);
@@ -36,7 +46,6 @@ pub fn run() {
 
     // ASCII art lines (gold-colored block letters)
     for line in &art {
-        let indent = "    ";
         let plain_len = indent.len() + line.chars().count();
         let remaining = w.saturating_sub(plain_len);
         println!(
@@ -54,7 +63,6 @@ pub fn run() {
 
     // Tagline (bold)
     {
-        let indent = "    ";
         let plain_len = indent.len() + tagline.chars().count();
         let remaining = w.saturating_sub(plain_len);
         println!(
@@ -69,7 +77,6 @@ pub fn run() {
 
     // Version + platform (dimmed)
     {
-        let indent = "    ";
         let plain_len = indent.len() + meta.chars().count();
         let remaining = w.saturating_sub(plain_len);
         println!(
