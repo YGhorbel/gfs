@@ -15,7 +15,10 @@ use gfs_domain::utils::data_dir;
 
 use crate::ComputeAction;
 use crate::cli_utils::{get_repo_dir, relativize_to_repo};
-use crate::output::{bold, box_bottom, box_row, box_top, dimmed, green, red, yellow};
+use crate::output::{
+    bold, box_bottom, box_row, box_top, dimmed, fmt_box_row, fmt_box_row_colored, green, red,
+    yellow,
+};
 
 // ---------------------------------------------------------------------------
 // Entry point called from main
@@ -114,6 +117,7 @@ async fn dispatch(
             let (instance_id, status) =
                 start_restart_or_recreate(compute, &instance_id, &repo_path, false).await?;
             let data_dir = container_data_dir(compute, &instance_id, path.clone()).await;
+            println!("{} Compute started", green("✓"));
             print_status(&status, data_dir.as_deref(), path.as_ref());
         }
 
@@ -122,6 +126,7 @@ async fn dispatch(
                 .stop(&instance_id)
                 .await
                 .map_err(anyhow::Error::from)?;
+            println!("{} Compute stopped", green("✓"));
             print_status(&status, None, path.as_ref());
         }
 
@@ -130,6 +135,7 @@ async fn dispatch(
             let (instance_id, status) =
                 start_restart_or_recreate(compute, &instance_id, &repo_path, true).await?;
             let data_dir = container_data_dir(compute, &instance_id, path.clone()).await;
+            println!("{} Compute restarted", green("✓"));
             print_status(&status, data_dir.as_deref(), path.as_ref());
         }
 
@@ -138,6 +144,7 @@ async fn dispatch(
                 .pause(&instance_id)
                 .await
                 .map_err(anyhow::Error::from)?;
+            println!("{} Compute paused", green("✓"));
             print_status(&status, None, path.as_ref());
         }
 
@@ -146,6 +153,7 @@ async fn dispatch(
                 .unpause(&instance_id)
                 .await
                 .map_err(anyhow::Error::from)?;
+            println!("{} Compute unpaused", green("✓"));
             print_status(&status, None, path.as_ref());
         }
 
@@ -201,33 +209,14 @@ async fn dispatch(
 // ---------------------------------------------------------------------------
 
 const BOX_W: usize = 40;
-const LABEL_W: usize = 18;
-
-fn fmt_row(label: &str, value: &str) -> String {
-    let value_w = BOX_W - LABEL_W - 1;
-    let padded_label = format!("{:<w$}", label, w = LABEL_W);
-    let padded_value = format!("{:<w$}", value, w = value_w);
-    format!("{} {}", dimmed(&padded_label), padded_value)
-}
-
-fn fmt_row_colored(label: &str, colored_value: &str, raw_value: &str) -> String {
-    let value_w = BOX_W - LABEL_W - 1;
-    let padded_label = format!("{:<w$}", label, w = LABEL_W);
-    let remaining = value_w.saturating_sub(raw_value.chars().count());
-    format!(
-        "{} {}{}",
-        dimmed(&padded_label),
-        colored_value,
-        " ".repeat(remaining)
-    )
-}
+const LABEL_W: usize = 20;
 
 fn print_status(s: &InstanceStatus, data_dir: Option<&str>, path: Option<&PathBuf>) {
     println!("{}", box_top(&bold("Compute"), BOX_W));
 
     // ID
     let truncated_id = truncate_id(&s.id.0);
-    let row = fmt_row_colored("id", &dimmed(&truncated_id), &truncated_id);
+    let row = fmt_box_row_colored("id", &dimmed(&truncated_id), &truncated_id, LABEL_W, BOX_W);
     println!("{}", box_row(&row, BOX_W));
 
     // State with dot indicator
@@ -235,27 +224,27 @@ fn print_status(s: &InstanceStatus, data_dir: Option<&str>, path: Option<&PathBu
     let dot = status_indicator_colored(&s.state);
     let colored_state = format!("{} {}", dot, format_state_colored_text(&s.state));
     let raw_state = format!("{} {}", status_indicator_raw(&s.state), state_str);
-    let row = fmt_row_colored("state", &colored_state, &raw_state);
+    let row = fmt_box_row_colored("state", &colored_state, &raw_state, LABEL_W, BOX_W);
     println!("{}", box_row(&row, BOX_W));
 
     // PID
     if let Some(pid) = s.pid {
         let pid_str = pid.to_string();
-        let row = fmt_row("pid", &pid_str);
+        let row = fmt_box_row("pid", &pid_str, LABEL_W, BOX_W);
         println!("{}", box_row(&row, BOX_W));
     }
 
     // Started at
     if let Some(started_at) = s.started_at {
         let ts = started_at.format("%Y-%m-%dT%H:%M:%SZ").to_string();
-        let row = fmt_row("started_at", &ts);
+        let row = fmt_box_row("started_at", &ts, LABEL_W, BOX_W);
         println!("{}", box_row(&row, BOX_W));
     }
 
     // Exit code
     if let Some(code) = s.exit_code {
         let code_str = code.to_string();
-        let row = fmt_row("exit_code", &code_str);
+        let row = fmt_box_row("exit_code", &code_str, LABEL_W, BOX_W);
         println!("{}", box_row(&row, BOX_W));
     }
 
@@ -263,7 +252,7 @@ fn print_status(s: &InstanceStatus, data_dir: Option<&str>, path: Option<&PathBu
     if let Some(dir) = data_dir {
         let repo_path = path.cloned().unwrap_or_else(get_repo_dir);
         let rel = relativize_to_repo(&repo_path, dir);
-        let row = fmt_row("data dir", &rel);
+        let row = fmt_box_row("data dir", &rel, LABEL_W, BOX_W);
         println!("{}", box_row(&row, BOX_W));
     }
 

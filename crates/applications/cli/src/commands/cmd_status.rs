@@ -14,6 +14,7 @@ use gfs_domain::usecases::repository::status_repo_usecase::StatusRepoUseCase;
 use crate::cli_utils::{get_repo_dir, relativize_to_repo};
 use crate::output::{
     bold, box_bottom, box_row, box_top, cyan, dimmed, green, red, yellow, BOX_V,
+    fmt_box_row, fmt_box_row_colored,
 };
 
 // ---------------------------------------------------------------------------
@@ -59,37 +60,22 @@ pub async fn run(path: Option<PathBuf>, output: String) -> Result<i32> {
 const LABEL_W: usize = 20;
 const BOX_W: usize = 40;
 
-fn fmt_row(label: &str, value: &str) -> String {
-    // Pad label first (plain text), then apply dimmed.
-    // Pad value to fill the box width.
-    let value_w = BOX_W - LABEL_W - 1;
-    let padded_label = format!("{:<w$}", label, w = LABEL_W);
-    let padded_value = format!("{:<w$}", value, w = value_w);
-    format!("{} {}", dimmed(&padded_label), padded_value)
-}
-
-fn fmt_row_colored(label: &str, colored_value: &str, raw_value: &str) -> String {
-    let value_w = BOX_W - LABEL_W - 1;
-    let padded_label = format!("{:<w$}", label, w = LABEL_W);
-    let remaining = value_w.saturating_sub(raw_value.chars().count());
-    format!(
-        "{} {}{}",
-        dimmed(&padded_label),
-        colored_value,
-        " ".repeat(remaining)
-    )
-}
-
 fn print_table(s: &StatusResponse, repo_path: &Path) {
     // Repository section
     println!("{}", box_top(&bold("Repository"), BOX_W));
 
-    let branch_row = fmt_row_colored("Branch", &cyan(&s.current_branch), &s.current_branch);
+    let branch_row = fmt_box_row_colored(
+        "Branch",
+        &cyan(&s.current_branch),
+        &s.current_branch,
+        LABEL_W,
+        BOX_W,
+    );
     println!("{}", box_row(&branch_row, BOX_W));
 
     if let Some(ref active) = s.active_workspace_data_dir {
         let rel = relativize_to_repo(repo_path, active);
-        let row = fmt_row("Active workspace", &rel);
+        let row = fmt_box_row("Active workspace", &rel, LABEL_W, BOX_W);
         println!("{}", box_row(&row, BOX_W));
     }
     println!("{}", box_bottom(BOX_W));
@@ -106,27 +92,33 @@ fn print_table(s: &StatusResponse, repo_path: &Path) {
 
         println!("{}", box_top(&bold("Compute"), BOX_W));
 
-        let row = fmt_row("Provider", &c.provider);
+        let row = fmt_box_row("Provider", &c.provider, LABEL_W, BOX_W);
         println!("{}", box_row(&row, BOX_W));
 
-        let row = fmt_row("Version", &c.version);
+        let row = fmt_box_row("Version", &c.version, LABEL_W, BOX_W);
         println!("{}", box_row(&row, BOX_W));
 
         let status_colored = format!("{} {}", status_dot, c.container_status);
-        let row = fmt_row_colored("Status", &status_colored, &status_raw);
+        let row = fmt_box_row_colored("Status", &status_colored, &status_raw, LABEL_W, BOX_W);
         println!("{}", box_row(&row, BOX_W));
 
         let truncated = truncate_id(&c.container_id);
-        let row = fmt_row_colored("Container ID", &dimmed(&truncated), &truncated);
+        let row = fmt_box_row_colored(
+            "Container ID",
+            &dimmed(&truncated),
+            &truncated,
+            LABEL_W,
+            BOX_W,
+        );
         println!("{}", box_row(&row, BOX_W));
 
         if let Some(ref bind) = c.data_bind_host_path {
             let rel = relativize_to_repo(repo_path, bind);
-            let row = fmt_row("Container data dir", &rel);
+            let row = fmt_box_row("Container data dir", &rel, LABEL_W, BOX_W);
             println!("{}", box_row(&row, BOX_W));
         }
         if !c.connection_string.is_empty() {
-            let row = fmt_row("Connection", &c.connection_string);
+            let row = fmt_box_row("Connection", &c.connection_string, LABEL_W, BOX_W);
             println!("{}", box_row(&row, BOX_W));
         }
         println!("{}", box_bottom(BOX_W));

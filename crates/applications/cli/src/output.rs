@@ -167,3 +167,37 @@ pub fn tbl_rule(cols: &[usize], left: &str, mid: &str, right: &str) -> String {
     let segments: Vec<String> = cols.iter().map(|&w| TBL_H.repeat(w + 2)).collect();
     format!("  {}{}{}", left, segments.join(mid), right)
 }
+
+// ---------------------------------------------------------------------------
+// Box content formatting (key/value rows)
+// ---------------------------------------------------------------------------
+
+/// Format a key/value row for a rounded box panel.
+///
+/// Contract: `box_row()` expects `content` to already be padded to `box_width`
+/// visible chars. These helpers pad raw text first, then apply styling.
+pub fn fmt_box_row(label: &str, value: &str, label_width: usize, box_width: usize) -> String {
+    let value_w = box_width.saturating_sub(label_width).saturating_sub(1);
+    let padded_label = format!("{:<w$}", label, w = label_width);
+    let padded_value = format!("{:<w$}", value, w = value_w);
+    format!("{} {}", dimmed(&padded_label), padded_value)
+}
+
+/// Same as [`fmt_box_row`], but allows a colored value while padding based on `raw_value`.
+pub fn fmt_box_row_colored(
+    label: &str,
+    colored_value: &str,
+    raw_value: &str,
+    label_width: usize,
+    box_width: usize,
+) -> String {
+    let value_w = box_width.saturating_sub(label_width).saturating_sub(1);
+    let padded_label = format!("{:<w$}", label, w = label_width);
+    let remaining = value_w.saturating_sub(raw_value.chars().count());
+    format!(
+        "{} {}{}",
+        dimmed(&padded_label),
+        colored_value,
+        " ".repeat(remaining)
+    )
+}
