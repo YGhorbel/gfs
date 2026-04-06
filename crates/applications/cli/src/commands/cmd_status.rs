@@ -13,8 +13,8 @@ use gfs_domain::usecases::repository::status_repo_usecase::StatusRepoUseCase;
 
 use crate::cli_utils::{get_repo_dir, relativize_to_repo};
 use crate::output::{
-    bold, box_bottom, box_row, box_top, cyan, dimmed, green, red, yellow, BOX_V,
-    fmt_box_row, fmt_box_row_colored,
+    BOX_V, bold, box_bottom, box_row, box_top, cyan, dimmed, fmt_box_row, fmt_box_row_colored,
+    green, red, yellow,
 };
 
 // ---------------------------------------------------------------------------

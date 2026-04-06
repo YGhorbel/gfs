@@ -8,8 +8,8 @@ use gfs_domain::ports::database_provider::{
 };
 
 use crate::output::{
-    bold, cyan, tbl_rule, TBL_BL, TBL_BR, TBL_T_DOWN, TBL_T_LEFT, TBL_T_RIGHT, TBL_T_UP,
-    TBL_TL, TBL_TR, TBL_V,
+    TBL_BL, TBL_BR, TBL_T_DOWN, TBL_T_LEFT, TBL_T_RIGHT, TBL_T_UP, TBL_TL, TBL_TR, TBL_V, bold,
+    cyan, tbl_rule,
 };
 
 // ---------------------------------------------------------------------------
@@ -102,10 +102,7 @@ fn print_providers_table(rows: &[(String, String, String)]) {
     );
 
     // Separator: ├──────┼──────┼──────┤
-    println!(
-        "{}",
-        tbl_rule(&cols, TBL_T_RIGHT, "┼", TBL_T_LEFT)
-    );
+    println!("{}", tbl_rule(&cols, TBL_T_RIGHT, "┼", TBL_T_LEFT));
 
     // Data rows
     for (name, versions, features) in rows {
@@ -155,23 +152,13 @@ fn print_features_table(features: &[SupportedFeature]) {
     );
 
     // Separator
-    println!(
-        "{}",
-        tbl_rule(&cols, TBL_T_RIGHT, "┼", TBL_T_LEFT)
-    );
+    println!("{}", tbl_rule(&cols, TBL_T_RIGHT, "┼", TBL_T_LEFT));
 
     // Rows
     for f in features {
         let feat = format!("{:<w$}", f.id, w = COL_FEATURE);
-        let desc = format!(
-            "{:<w$}",
-            truncate(&f.description, COL_DESC),
-            w = COL_DESC
-        );
-        println!(
-            "  {} {} {} {} {}",
-            TBL_V, feat, TBL_V, desc, TBL_V
-        );
+        let desc = format!("{:<w$}", truncate(&f.description, COL_DESC), w = COL_DESC);
+        println!("  {} {} {} {} {}", TBL_V, feat, TBL_V, desc, TBL_V);
     }
 
     // Bottom
