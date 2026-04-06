@@ -9,6 +9,7 @@ use gfs_domain::ports::database_provider::InMemoryDatabaseProviderRegistry;
 use gfs_domain::ports::repository::Repository;
 use gfs_domain::usecases::repository::init_repo_usecase::InitRepositoryUseCase;
 use gfs_domain::usecases::repository::status_repo_usecase::StatusRepoUseCase;
+use serde_json::json;
 
 use crate::cli_utils::get_repo_dir;
 use crate::output::{cyan, dimmed, green};
@@ -18,6 +19,7 @@ pub async fn init(
     database_provider: Option<String>,
     database_version: Option<String>,
     database_port: Option<u16>,
+    json_output: bool,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     tracing::trace!("Initializing Guepard environment at: {:?}", path);
 
@@ -50,44 +52,41 @@ pub async fn init(
         )
         .await?;
 
-    // Success feedback
-    println!(
-        "  {} Initialized GFS repository at {}",
-        green("✓"),
-        cyan(target_path.display().to_string())
-    );
-    println!();
-    println!(
-        "    {:<16} {}",
-        dimmed("Branch"),
-        cyan("main")
-    );
-    println!(
-        "    {:<16} {}",
-        dimmed("Config"),
-        ".gfs/config.toml"
-    );
-    if let Some(ref provider) = provider_display {
-        println!(
-            "    {:<16} {}",
-            dimmed("Provider"),
-            cyan(provider)
-        );
-    }
-
-    // If a database was provisioned, fetch and show the connection string.
+    let mut connection_string: Option<String> = None;
     if has_provider {
         let status_uc = StatusRepoUseCase::new(repository, compute, registry);
         if let Ok(status) = status_uc.run(&target_path).await {
-            if let Some(ref c) = status.compute {
-                if !c.connection_string.is_empty() {
-                    println!(
-                        "    {:<16} {}",
-                        dimmed("Connection"),
-                        cyan(&c.connection_string)
-                    );
-                }
-            }
+            connection_string = status
+                .compute
+                .and_then(|c| (!c.connection_string.is_empty()).then_some(c.connection_string));
+        }
+    }
+
+    if json_output {
+        println!(
+            "{}",
+            json!({
+                "path": target_path.display().to_string(),
+                "branch": "main",
+                "config": ".gfs/config.toml",
+                "provider": provider_display,
+                "connection_string": connection_string,
+            })
+        );
+    } else {
+        println!(
+            "  {} Initialized GFS repository at {}",
+            green("✓"),
+            cyan(target_path.display().to_string())
+        );
+        println!();
+        println!("    {:<16} {}", dimmed("Branch"), cyan("main"));
+        println!("    {:<16} {}", dimmed("Config"), ".gfs/config.toml");
+        if let Some(ref provider) = provider_display {
+            println!("    {:<16} {}", dimmed("Provider"), cyan(provider));
+        }
+        if let Some(ref c) = connection_string {
+            println!("    {:<16} {}", dimmed("Connection"), cyan(c));
         }
     }
 
