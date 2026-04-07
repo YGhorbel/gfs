@@ -332,8 +332,8 @@ enum TopLevel {
         path: Option<PathBuf>,
 
         /// Output format: table (default) or json
-        #[arg(long, default_value = "table", value_parser = ["table", "json"])]
-        output: String,
+        #[arg(long, value_parser = ["table", "json"])]
+        output: Option<String>,
     },
 
     /// Storage operations (mount, unmount, snapshot, clone, status, quota)
@@ -582,6 +582,11 @@ where
                 Ok(0)
             }
             TopLevel::Status { path, output } => {
+                let output = match output {
+                    Some(o) => o,
+                    None if json_output => "json".to_string(),
+                    None => "table".to_string(),
+                };
                 let exit_code = commands::cmd_status::run(path, output).await?;
                 Ok(exit_code)
             }
