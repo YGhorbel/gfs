@@ -4,11 +4,11 @@
 
 use std::path::Path;
 use std::path::PathBuf;
-use std::process::Command;
 use std::thread;
 use std::time::Duration;
 
 use super::cli_runner;
+use super::container_runtime;
 use gfs_domain::repo_utils::repo_layout;
 use tempfile::TempDir;
 
@@ -24,10 +24,10 @@ struct ContainerCleanupGuard {
 
 impl Drop for ContainerCleanupGuard {
     fn drop(&mut self) {
-        let _ = Command::new("docker")
+        let _ = container_runtime::runtime_command()
             .args(["stop", &self.initial_container_id])
             .output();
-        let _ = Command::new("docker")
+        let _ = container_runtime::runtime_command()
             .args(["rm", "-f", &self.initial_container_id])
             .output();
 
@@ -37,10 +37,10 @@ impl Drop for ContainerCleanupGuard {
             .map(|r| r.container_name)
             .filter(|id| id != &self.initial_container_id)
         {
-            let _ = Command::new("docker")
+            let _ = container_runtime::runtime_command()
                 .args(["stop", &current_container_id])
                 .output();
-            let _ = Command::new("docker")
+            let _ = container_runtime::runtime_command()
                 .args(["rm", "-f", &current_container_id])
                 .output();
         }
@@ -82,7 +82,7 @@ where
 pub fn run_clickhouse_query(container_id: &str, query: &str) -> String {
     let mut last_output = String::new();
     for _ in 0..10 {
-        let out = Command::new("docker")
+        let out = container_runtime::runtime_command()
             .args([
                 "exec",
                 container_id,
@@ -91,6 +91,8 @@ pub fn run_clickhouse_query(container_id: &str, query: &str) -> String {
                 TEST_USER,
                 "--password",
                 TEST_PASSWORD,
+                "--connect_timeout",
+                "2",
                 "--query",
                 query,
             ])
@@ -118,8 +120,9 @@ pub fn get_container_id(repo_path: &Path) -> String {
 }
 
 pub fn wait_for_clickhouse(container_id: &str) -> bool {
+    let mut last = String::new();
     for _ in 0..30 {
-        let ok = Command::new("docker")
+        let out = container_runtime::runtime_command()
             .args([
                 "exec",
                 container_id,
@@ -128,16 +131,25 @@ pub fn wait_for_clickhouse(container_id: &str) -> bool {
                 TEST_USER,
                 "--password",
                 TEST_PASSWORD,
+                "--connect_timeout",
+                "2",
                 "--query",
                 "SELECT 1",
             ])
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
+            .output();
+        let ok = out.as_ref().map(|o| o.status.success()).unwrap_or(false);
         if ok {
             return true;
         }
+        if let Ok(o) = out {
+            last = format!(
+                "{}\n{}",
+                String::from_utf8_lossy(&o.stdout),
+                String::from_utf8_lossy(&o.stderr)
+            );
+        }
         thread::sleep(Duration::from_secs(1));
     }
+    eprintln!("clickhouse readiness failed, last output:\n{last}");
     false
 }

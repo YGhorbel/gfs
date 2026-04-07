@@ -12,13 +12,17 @@ use gfs_domain::ports::repository::Repository;
 use gfs_domain::usecases::repository::status_repo_usecase::StatusRepoUseCase;
 
 use crate::cli_utils::{get_repo_dir, relativize_to_repo};
-use crate::output::{bold, cyan, dimmed, green, red, yellow};
+use crate::output::{
+    BOX_V, bold, box_bottom, box_row, box_top, cyan, dimmed, fmt_box_row, fmt_box_row_colored,
+    green, red, yellow,
+};
 
 // ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
 
-pub async fn run(path: Option<PathBuf>, output: String) -> Result<()> {
+/// Returns exit code: 0 = compute running (or no compute configured), 1 = compute not running.
+pub async fn run(path: Option<PathBuf>, output: String) -> Result<i32> {
     let repo_path = path.unwrap_or_else(get_repo_dir);
 
     let repository: Arc<dyn Repository> = Arc::new(GfsRepository::new());
@@ -40,79 +44,89 @@ pub async fn run(path: Option<PathBuf>, output: String) -> Result<()> {
         _ => print_table(&status, &repo_path),
     }
 
-    Ok(())
+    // Exit code: 0 if no compute or compute is running, 1 otherwise.
+    let exit_code = match &status.compute {
+        Some(c) if c.container_status != "running" => 1,
+        _ => 0,
+    };
+
+    Ok(exit_code)
 }
 
 // ---------------------------------------------------------------------------
 // Output formats
 // ---------------------------------------------------------------------------
 
-const LABEL_WIDTH: usize = 20;
+const LABEL_W: usize = 20;
+const BOX_W: usize = 40;
 
 fn print_table(s: &StatusResponse, repo_path: &Path) {
     // Repository section
-    println!("  {}", bold("Repository"));
-    println!("  {}", "─".repeat(40));
-    println!(
-        "  {:<width$} {}",
+    println!("{}", box_top(&bold("Repository"), BOX_W));
+
+    let branch_row = fmt_box_row_colored(
         "Branch",
-        cyan(&s.current_branch),
-        width = LABEL_WIDTH
+        &cyan(&s.current_branch),
+        &s.current_branch,
+        LABEL_W,
+        BOX_W,
     );
+    println!("{}", box_row(&branch_row, BOX_W));
+
     if let Some(ref active) = s.active_workspace_data_dir {
-        println!(
-            "  {:<width$} {}",
-            "Active workspace",
-            relativize_to_repo(repo_path, active),
-            width = LABEL_WIDTH
-        );
+        let rel = relativize_to_repo(repo_path, active);
+        let row = fmt_box_row("Active workspace", &rel, LABEL_W, BOX_W);
+        println!("{}", box_row(&row, BOX_W));
     }
+    println!("{}", box_bottom(BOX_W));
+
     println!();
 
     if let Some(ref c) = s.compute {
         let status_dot = status_indicator_colored(&c.container_status);
-        println!("  {}", bold("Compute"));
-        println!("  {}", "─".repeat(40));
-        println!(
-            "  {:<width$} {}",
-            "Provider",
-            c.provider,
-            width = LABEL_WIDTH
+        let status_raw = format!(
+            "{} {}",
+            status_indicator(&c.container_status),
+            c.container_status
         );
-        println!("  {:<width$} {}", "Version", c.version, width = LABEL_WIDTH);
-        println!(
-            "  {:<width$} {} {}",
-            "Status",
-            status_dot,
-            c.container_status,
-            width = LABEL_WIDTH
-        );
-        println!(
-            "  {:<width$} {}",
+
+        println!("{}", box_top(&bold("Compute"), BOX_W));
+
+        let row = fmt_box_row("Provider", &c.provider, LABEL_W, BOX_W);
+        println!("{}", box_row(&row, BOX_W));
+
+        let row = fmt_box_row("Version", &c.version, LABEL_W, BOX_W);
+        println!("{}", box_row(&row, BOX_W));
+
+        let status_colored = format!("{} {}", status_dot, c.container_status);
+        let row = fmt_box_row_colored("Status", &status_colored, &status_raw, LABEL_W, BOX_W);
+        println!("{}", box_row(&row, BOX_W));
+
+        let truncated = truncate_id(&c.container_id);
+        let row = fmt_box_row_colored(
             "Container ID",
-            dimmed(truncate_id(&c.container_id)),
-            width = LABEL_WIDTH
+            &dimmed(&truncated),
+            &truncated,
+            LABEL_W,
+            BOX_W,
         );
+        println!("{}", box_row(&row, BOX_W));
+
         if let Some(ref bind) = c.data_bind_host_path {
-            println!(
-                "  {:<width$} {}",
-                "Container data dir",
-                relativize_to_repo(repo_path, bind),
-                width = LABEL_WIDTH
-            );
+            let rel = relativize_to_repo(repo_path, bind);
+            let row = fmt_box_row("Container data dir", &rel, LABEL_W, BOX_W);
+            println!("{}", box_row(&row, BOX_W));
         }
         if !c.connection_string.is_empty() {
-            println!(
-                "  {:<width$} {}",
-                "Connection",
-                c.connection_string,
-                width = LABEL_WIDTH
-            );
+            let row = fmt_box_row("Connection", &c.connection_string, LABEL_W, BOX_W);
+            println!("{}", box_row(&row, BOX_W));
         }
+        println!("{}", box_bottom(BOX_W));
     } else {
-        println!("  {}", bold("Compute"));
-        println!("  {}", "─".repeat(40));
-        println!("  (no compute instance configured)");
+        println!("{}", box_top(&bold("Compute"), BOX_W));
+        let msg = format!("{:<w$}", "(no compute instance configured)", w = BOX_W);
+        println!("  {} {} {}", BOX_V, dimmed(&msg), BOX_V);
+        println!("{}", box_bottom(BOX_W));
     }
 
     if let Some(ref warning) = s.bind_mismatch_warning {
