@@ -8,13 +8,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use gfs_compute_docker::DockerCompute;
 use gfs_domain::adapters::gfs_repository::GfsRepository;
 use gfs_domain::ports::compute::Compute;
 use gfs_domain::ports::database_provider::InMemoryDatabaseProviderRegistry;
 use gfs_domain::ports::repository::Repository;
 use gfs_domain::usecases::repository::checkout_repo_usecase::CheckoutRepoUseCase;
 
+use super::compute_support::compute_for_repo;
 use crate::cli_utils::get_repo_dir;
 use crate::output::{cyan, dimmed, green};
 
@@ -39,9 +39,7 @@ pub async fn checkout(
     let repo_path = path.unwrap_or_else(get_repo_dir);
 
     let repository: Arc<dyn Repository> = Arc::new(GfsRepository::new());
-    let compute: Arc<dyn Compute> = Arc::new(DockerCompute::new().context(
-        "failed to connect to Docker/Podman daemon (is your container runtime running?)",
-    )?);
+    let compute: Arc<dyn Compute> = compute_for_repo(&repository, &repo_path).await?;
     let registry = Arc::new(InMemoryDatabaseProviderRegistry::new());
     gfs_compute_docker::containers::register_all(registry.as_ref())
         .context("failed to register database providers")?;

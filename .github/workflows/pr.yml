@@ -47,4 +47,9 @@ jobs:
         run: cargo fmt -- --check
 
       - name: Run tests
+        if: matrix.os == 'ubuntu-latest'
         run: cargo test --verbose
+
+      - name: Run tests (macOS/Windows)
+        if: matrix.os != 'ubuntu-latest'
+        run: cargo test --verbose -- --skip clickhouse --skip postgres
