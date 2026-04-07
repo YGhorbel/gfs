@@ -17,8 +17,9 @@ use gfs_domain::ports::database_provider::InMemoryDatabaseProviderRegistry;
 use gfs_domain::ports::repository::Repository;
 use gfs_domain::repo_utils::repo_layout;
 use gfs_domain::usecases::repository::checkout_repo_usecase::CheckoutRepoUseCase;
+use serde_json::json;
 
-use crate::cli_utils::get_repo_dir;
+use crate::cli_utils::{get_repo_dir, list_branch_tips};
 use crate::output::{cyan, dimmed, gold, green};
 
 // ---------------------------------------------------------------------------
@@ -31,18 +32,26 @@ pub async fn run(
     start_point: Option<String>,
     delete: Option<String>,
     switch: bool,
+    json_output: bool,
 ) -> Result<()> {
     let repo_path = path.unwrap_or_else(get_repo_dir);
 
     if let Some(ref branch_name) = delete {
-        return delete_branch(&repo_path, branch_name);
+        return delete_branch(&repo_path, branch_name, json_output);
     }
 
     match name {
         Some(branch_name) => {
-            create_branch(&repo_path, &branch_name, start_point.as_deref(), switch).await
+            create_branch(
+                &repo_path,
+                &branch_name,
+                start_point.as_deref(),
+                switch,
+                json_output,
+            )
+            .await
         }
-        None => list_branches(&repo_path),
+        None => list_branches(&repo_path, json_output),
     }
 }
 
@@ -50,14 +59,13 @@ pub async fn run(
 // List branches
 // ---------------------------------------------------------------------------
 
-fn list_branches(repo_path: &std::path::Path) -> Result<()> {
-    let refs_dir = repo_path.join(GFS_DIR).join(REFS_DIR).join(HEADS_DIR);
-    if !refs_dir.exists() {
-        anyhow::bail!("not a GFS repository (no refs directory)");
-    }
-
-    let branches = collect_refs(&refs_dir, "")?;
+fn list_branches(repo_path: &std::path::Path, json_output: bool) -> Result<()> {
+    let branches = list_branch_tips(repo_path, false)?;
     if branches.is_empty() {
+        if json_output {
+            println!("{}", serde_json::to_string_pretty(&json!({ "branches": [] }))?);
+            return Ok(());
+        }
         println!("  (no branches)");
         return Ok(());
     }
@@ -76,13 +84,40 @@ fn list_branches(repo_path: &std::path::Path) -> Result<()> {
         }
     });
 
+    if json_output {
+        let out: Vec<_> = sorted
+            .iter()
+            .map(|(name, hash)| {
+                let subject = if hash == "0" || hash.len() < 7 {
+                    String::new()
+                } else {
+                    repo_layout::get_commit_from_hash(repo_path, hash)
+                        .map(|c| c.message.lines().next().unwrap_or("").to_string())
+                        .unwrap_or_default()
+                };
+                json!({
+                    "name": name,
+                    "hash": hash,
+                    "subject": subject,
+                    "current": *name == current,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&json!({ "branches": out }))?);
+        return Ok(());
+    }
+
     for (name, hash) in &sorted {
         let short_hash = &hash[..7.min(hash.len())];
 
         // Get the commit message for this branch tip.
-        let subject = repo_layout::get_commit_from_hash(repo_path, hash)
-            .map(|c| c.message.lines().next().unwrap_or("").to_string())
-            .unwrap_or_default();
+        let subject = if hash == "0" || hash.len() < 7 {
+            String::new()
+        } else {
+            repo_layout::get_commit_from_hash(repo_path, hash)
+                .map(|c| c.message.lines().next().unwrap_or("").to_string())
+                .unwrap_or_default()
+        };
 
         if *name == current {
             println!(
@@ -100,31 +135,6 @@ fn list_branches(repo_path: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
-fn collect_refs(dir: &std::path::Path, prefix: &str) -> Result<Vec<(String, String)>> {
-    let mut result = Vec::new();
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        let name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("")
-            .to_string();
-        let branch_name = if prefix.is_empty() {
-            name
-        } else {
-            format!("{}/{}", prefix, name)
-        };
-        if path.is_file() {
-            let tip = std::fs::read_to_string(&path)?.trim().to_string();
-            result.push((branch_name, tip));
-        } else if path.is_dir() {
-            result.extend(collect_refs(&path, &branch_name)?);
-        }
-    }
-    Ok(result)
-}
-
 // ---------------------------------------------------------------------------
 // Create branch (optionally switch to it)
 // ---------------------------------------------------------------------------
@@ -134,6 +144,7 @@ async fn create_branch(
     name: &str,
     start_point: Option<&str>,
     switch: bool,
+    json_output: bool,
 ) -> Result<()> {
     if switch {
         // Use the full checkout flow (stops/starts compute, creates workspace).
@@ -151,6 +162,19 @@ async fn create_branch(
             .run(repo_path.to_path_buf(), revision, Some(name.to_string()))
             .await
             .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+        if json_output {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({
+                    "action": "create_and_checkout",
+                    "branch": name,
+                    "hash": commit_hash,
+                    "start_point": start_point.unwrap_or("HEAD"),
+                }))?
+            );
+            return Ok(());
+        }
 
         let short_hash = &commit_hash[..7.min(commit_hash.len())];
         println!(
@@ -181,8 +205,22 @@ async fn create_branch(
             .await
             .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-        let short_hash = &commit_hash[..7.min(commit_hash.len())];
         let start_label = start_point.unwrap_or("HEAD");
+
+        if json_output {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({
+                    "action": "create",
+                    "branch": name,
+                    "hash": commit_hash,
+                    "start_point": start_label,
+                }))?
+            );
+            return Ok(());
+        }
+
+        let short_hash = &commit_hash[..7.min(commit_hash.len())];
         println!(
             "{} Created branch '{}' at {} ({})",
             green("✓"),
@@ -199,7 +237,7 @@ async fn create_branch(
 // Delete branch
 // ---------------------------------------------------------------------------
 
-fn delete_branch(repo_path: &std::path::Path, name: &str) -> Result<()> {
+fn delete_branch(repo_path: &std::path::Path, name: &str, json_output: bool) -> Result<()> {
     let current = repo_layout::get_current_branch(repo_path).unwrap_or_default();
     if name == current {
         anyhow::bail!("cannot delete the currently checked out branch '{}'", name);
@@ -225,6 +263,17 @@ fn delete_branch(repo_path: &std::path::Path, name: &str) -> Result<()> {
             let _ = std::fs::remove_dir(dir);
         }
         parent = dir.parent();
+    }
+
+    if json_output {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "action": "delete",
+                "branch": name,
+            }))?
+        );
+        return Ok(());
     }
 
     println!("{} Deleted branch '{}'", green("✓"), name);

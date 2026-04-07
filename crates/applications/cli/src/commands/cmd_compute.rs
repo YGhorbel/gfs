@@ -12,6 +12,7 @@ use gfs_domain::repo_utils::repo_layout;
 #[cfg(unix)]
 use gfs_domain::utils::current_user;
 use gfs_domain::utils::data_dir;
+use serde_json::json;
 
 use crate::ComputeAction;
 use crate::cli_utils::{get_repo_dir, relativize_to_repo};
@@ -52,17 +53,17 @@ fn resolve_id(path: Option<PathBuf>, action: &ComputeAction) -> Result<String> {
     Ok(container_name.to_string())
 }
 
-pub async fn run(path: Option<PathBuf>, action: ComputeAction) -> Result<()> {
+pub async fn run(path: Option<PathBuf>, action: ComputeAction, json_output: bool) -> Result<()> {
     if let ComputeAction::Config { ref key, ref value } = action {
-        return handle_config(path, key, value);
+        return handle_config(path, key, value, json_output);
     }
     let compute = DockerCompute::new()
         .map_err(|e| anyhow::anyhow!("failed to connect to Docker/Podman daemon: {e}"))?;
     let id = resolve_id(path.clone(), &action)?;
-    dispatch(&compute, &id, action, path).await
+    dispatch(&compute, &id, action, path, json_output).await
 }
 
-fn handle_config(path: Option<PathBuf>, key: &str, value: &str) -> Result<()> {
+fn handle_config(path: Option<PathBuf>, key: &str, value: &str, json_output: bool) -> Result<()> {
     match key {
         "db.port" => {
             let port: u16 = value
@@ -79,6 +80,17 @@ fn handle_config(path: Option<PathBuf>, key: &str, value: &str) -> Result<()> {
                 );
             }
             config.save(&repo_path).context("failed to save config")?;
+            if json_output {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!({
+                        "action": "config_set",
+                        "key": "db.port",
+                        "value": port,
+                    }))?
+                );
+                return Ok(());
+            }
             println!(
                 "{} database_port updated to {}. Run 'gfs compute restart' to apply.",
                 green("✓"),
@@ -99,6 +111,7 @@ async fn dispatch(
     id: &str,
     action: ComputeAction,
     path: Option<PathBuf>,
+    json_output: bool,
 ) -> Result<()> {
     let instance_id = InstanceId(id.to_string());
 
@@ -109,7 +122,11 @@ async fn dispatch(
                 .await
                 .map_err(anyhow::Error::from)?;
             let data_dir = container_data_dir(compute, &instance_id, path.clone()).await;
-            print_status(&status, data_dir.as_deref(), path.as_ref());
+            if json_output {
+                print_status_json(&status, data_dir.as_deref(), path.as_ref(), None)?;
+            } else {
+                print_status(&status, data_dir.as_deref(), path.as_ref());
+            }
         }
 
         ComputeAction::Start { .. } => {
@@ -117,8 +134,12 @@ async fn dispatch(
             let (instance_id, status) =
                 start_restart_or_recreate(compute, &instance_id, &repo_path, false).await?;
             let data_dir = container_data_dir(compute, &instance_id, path.clone()).await;
-            println!("{} Compute started", green("✓"));
-            print_status(&status, data_dir.as_deref(), path.as_ref());
+            if json_output {
+                print_status_json(&status, data_dir.as_deref(), path.as_ref(), Some("start"))?;
+            } else {
+                println!("{} Compute started", green("✓"));
+                print_status(&status, data_dir.as_deref(), path.as_ref());
+            }
         }
 
         ComputeAction::Stop { .. } => {
@@ -126,8 +147,12 @@ async fn dispatch(
                 .stop(&instance_id)
                 .await
                 .map_err(anyhow::Error::from)?;
-            println!("{} Compute stopped", green("✓"));
-            print_status(&status, None, path.as_ref());
+            if json_output {
+                print_status_json(&status, None, path.as_ref(), Some("stop"))?;
+            } else {
+                println!("{} Compute stopped", green("✓"));
+                print_status(&status, None, path.as_ref());
+            }
         }
 
         ComputeAction::Restart { .. } => {
@@ -135,8 +160,12 @@ async fn dispatch(
             let (instance_id, status) =
                 start_restart_or_recreate(compute, &instance_id, &repo_path, true).await?;
             let data_dir = container_data_dir(compute, &instance_id, path.clone()).await;
-            println!("{} Compute restarted", green("✓"));
-            print_status(&status, data_dir.as_deref(), path.as_ref());
+            if json_output {
+                print_status_json(&status, data_dir.as_deref(), path.as_ref(), Some("restart"))?;
+            } else {
+                println!("{} Compute restarted", green("✓"));
+                print_status(&status, data_dir.as_deref(), path.as_ref());
+            }
         }
 
         ComputeAction::Pause { .. } => {
@@ -144,8 +173,12 @@ async fn dispatch(
                 .pause(&instance_id)
                 .await
                 .map_err(anyhow::Error::from)?;
-            println!("{} Compute paused", green("✓"));
-            print_status(&status, None, path.as_ref());
+            if json_output {
+                print_status_json(&status, None, path.as_ref(), Some("pause"))?;
+            } else {
+                println!("{} Compute paused", green("✓"));
+                print_status(&status, None, path.as_ref());
+            }
         }
 
         ComputeAction::Unpause { .. } => {
@@ -153,8 +186,12 @@ async fn dispatch(
                 .unpause(&instance_id)
                 .await
                 .map_err(anyhow::Error::from)?;
-            println!("{} Compute unpaused", green("✓"));
-            print_status(&status, None, path.as_ref());
+            if json_output {
+                print_status_json(&status, None, path.as_ref(), Some("unpause"))?;
+            } else {
+                println!("{} Compute unpaused", green("✓"));
+                print_status(&status, None, path.as_ref());
+            }
         }
 
         ComputeAction::Config { .. } => unreachable!("Config is handled before dispatch"),
@@ -187,6 +224,31 @@ async fn dispatch(
                 .await
                 .map_err(anyhow::Error::from)?;
 
+            if json_output {
+                let out: Vec<_> = entries
+                    .iter()
+                    .map(|e| {
+                        json!({
+                            "timestamp": e.timestamp.to_rfc3339(),
+                            "stream": match e.stream {
+                                gfs_domain::ports::compute::LogStream::Stdout => "stdout",
+                                gfs_domain::ports::compute::LogStream::Stderr => "stderr",
+                            },
+                            "message": e.message,
+                        })
+                    })
+                    .collect();
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!({
+                        "action": "logs",
+                        "id": instance_id.0,
+                        "entries": out,
+                    }))?
+                );
+                return Ok(());
+            }
+
             for entry in &entries {
                 println!(
                     "[{}] [{}] {}",
@@ -210,6 +272,32 @@ async fn dispatch(
 
 const BOX_W: usize = 40;
 const LABEL_W: usize = 20;
+
+fn print_status_json(
+    s: &InstanceStatus,
+    data_dir: Option<&str>,
+    path: Option<&PathBuf>,
+    action: Option<&str>,
+) -> Result<()> {
+    let repo_path = path.cloned().unwrap_or_else(get_repo_dir);
+    let rel_data_dir = data_dir.map(|d| relativize_to_repo(&repo_path, d));
+
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&json!({
+            "action": action,
+            "status": {
+                "id": s.id.0,
+                "state": format_state(&s.state),
+                "pid": s.pid,
+                "started_at": s.started_at.map(|t| t.to_rfc3339()),
+                "exit_code": s.exit_code,
+                "data_dir": rel_data_dir,
+            }
+        }))?
+    );
+    Ok(())
+}
 
 fn print_status(s: &InstanceStatus, data_dir: Option<&str>, path: Option<&PathBuf>) {
     println!("{}", box_top(&bold("Compute"), BOX_W));

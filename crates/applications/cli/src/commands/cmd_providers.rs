@@ -6,6 +6,7 @@ use anyhow::{Context, Result};
 use gfs_domain::ports::database_provider::{
     DatabaseProviderRegistry, InMemoryDatabaseProviderRegistry, SupportedFeature,
 };
+use serde_json::json;
 
 use crate::output::{
     TBL_BL, TBL_BR, TBL_CROSS, TBL_T_DOWN, TBL_T_LEFT, TBL_T_RIGHT, TBL_T_UP, TBL_TL, TBL_TR,
@@ -16,14 +17,26 @@ use crate::output::{
 // Entry point
 // ---------------------------------------------------------------------------
 
-pub fn run(provider_name: Option<String>) -> Result<()> {
+pub fn run(provider_name: Option<String>, json_output: bool) -> Result<()> {
     let registry = Arc::new(InMemoryDatabaseProviderRegistry::new());
     gfs_compute_docker::containers::register_all(registry.as_ref())
         .context("failed to register database providers")?;
 
     match provider_name {
-        Some(name) => print_provider_detail(registry.as_ref(), &name)?,
-        None => print_all_providers(registry.as_ref())?,
+        Some(name) => {
+            if json_output {
+                print_provider_detail_json(registry.as_ref(), &name)?
+            } else {
+                print_provider_detail(registry.as_ref(), &name)?
+            }
+        }
+        None => {
+            if json_output {
+                print_all_providers_json(registry.as_ref())?
+            } else {
+                print_all_providers(registry.as_ref())?
+            }
+        }
     }
     Ok(())
 }
@@ -54,6 +67,24 @@ fn print_all_providers(registry: &impl DatabaseProviderRegistry) -> Result<()> {
     Ok(())
 }
 
+fn print_all_providers_json(registry: &impl DatabaseProviderRegistry) -> Result<()> {
+    let names = registry.list();
+    let providers: Vec<_> = names
+        .into_iter()
+        .filter_map(|name| {
+            let provider = registry.get(&name)?;
+            Some(json!({
+                "name": name,
+                "versions": provider.supported_versions(),
+                "features": provider.supported_features().iter().map(|f| f.id.as_str()).collect::<Vec<_>>(),
+            }))
+        })
+        .collect();
+
+    println!("{}", serde_json::to_string_pretty(&json!({ "providers": providers }))?);
+    Ok(())
+}
+
 fn print_provider_detail(registry: &impl DatabaseProviderRegistry, name: &str) -> Result<()> {
     let provider = registry
         .get(name)
@@ -69,6 +100,27 @@ fn print_provider_detail(registry: &impl DatabaseProviderRegistry, name: &str) -
     print_features_table(&features);
     println!();
     println!("  Images are pulled from Docker Hub by default.");
+    Ok(())
+}
+
+fn print_provider_detail_json(registry: &impl DatabaseProviderRegistry, name: &str) -> Result<()> {
+    let provider = registry
+        .get(name)
+        .ok_or_else(|| anyhow::anyhow!("unknown provider: '{}'", name))?;
+
+    let features = provider.supported_features();
+    let out = json!({
+        "provider": {
+            "name": name,
+            "versions": provider.supported_versions(),
+            "features": features.iter().map(|f| json!({
+                "id": f.id,
+                "description": f.description,
+            })).collect::<Vec<_>>(),
+            "images_source": "docker_hub",
+        }
+    });
+    println!("{}", serde_json::to_string_pretty(&out)?);
     Ok(())
 }
 

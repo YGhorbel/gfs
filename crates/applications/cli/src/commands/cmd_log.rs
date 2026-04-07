@@ -5,33 +5,51 @@ use std::sync::Arc;
 use anyhow::Result;
 use gfs_domain::adapters::gfs_repository::GfsRepository;
 use gfs_domain::model::commit::{Commit, CommitWithRefs};
-use gfs_domain::model::layout::{GFS_DIR, HEADS_DIR, REFS_DIR};
 use gfs_domain::ports::repository::Repository;
 use gfs_domain::repo_utils::repo_layout;
 use gfs_domain::usecases::repository::log_repo_usecase::LogRepoUseCase;
+use serde_json::json;
 
-use crate::cli_utils::get_repo_dir;
+use crate::cli_utils::{get_repo_dir, list_branch_tips};
 use crate::output::{dimmed, gold, green};
 
 // ---------------------------------------------------------------------------
 // Entry point called from main
 // ---------------------------------------------------------------------------
 
-pub async fn log(
-    path: Option<PathBuf>,
-    max_count: Option<usize>,
-    from: Option<String>,
-    until: Option<String>,
-    full_hash: bool,
-    graph: bool,
-    all: bool,
-) -> Result<()> {
-    let repo_path = path.unwrap_or_else(get_repo_dir);
+pub struct LogArgs {
+    pub path: Option<PathBuf>,
+    pub max_count: Option<usize>,
+    pub from: Option<String>,
+    pub until: Option<String>,
+    pub full_hash: bool,
+    pub graph: bool,
+    pub all: bool,
+    pub json_output: bool,
+}
 
-    if graph || all {
-        run_graph(&repo_path, max_count, from, full_hash, all)?;
+pub async fn log(args: LogArgs) -> Result<()> {
+    let repo_path = args.path.unwrap_or_else(get_repo_dir);
+
+    if args.graph || args.all {
+        run_graph(
+            &repo_path,
+            args.max_count,
+            args.from,
+            args.full_hash,
+            args.all,
+            args.json_output,
+        )?;
     } else {
-        run_linear(&repo_path, max_count, from, until, full_hash).await?;
+        run_linear(
+            &repo_path,
+            args.max_count,
+            args.from,
+            args.until,
+            args.full_hash,
+            args.json_output,
+        )
+        .await?;
     }
 
     Ok(())
@@ -47,6 +65,7 @@ async fn run_linear(
     from: Option<String>,
     until: Option<String>,
     full_hash: bool,
+    json_output: bool,
 ) -> Result<()> {
     let repository: Arc<dyn Repository> = Arc::new(GfsRepository::new());
     let use_case = LogRepoUseCase::new(repository);
@@ -62,6 +81,15 @@ async fn run_linear(
         .await
         .map_err(|e| anyhow::anyhow!("{e}"))?;
 
+    if json_output {
+        let out: Vec<_> = commits
+            .iter()
+            .map(|cwr| json_commit(cwr, full_hash))
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&json!({ "commits": out }))?);
+        return Ok(());
+    }
+
     for cwr in &commits {
         let dot_prefix = format!("  {}", gold("●"));
         let pipe_prefix = format!("  {}", dimmed("│"));
@@ -74,40 +102,6 @@ async fn run_linear(
 // ---------------------------------------------------------------------------
 // Graph mode — full DAG visualization
 // ---------------------------------------------------------------------------
-
-/// Collect all branch tips: Vec<(branch_name, commit_hash)>.
-fn list_branches(repo_path: &Path) -> Result<Vec<(String, String)>> {
-    let refs_dir = repo_path.join(GFS_DIR).join(REFS_DIR).join(HEADS_DIR);
-    if !refs_dir.exists() {
-        return Ok(Vec::new());
-    }
-    collect_refs(&refs_dir, "")
-}
-
-fn collect_refs(dir: &Path, prefix: &str) -> Result<Vec<(String, String)>> {
-    let mut result = Vec::new();
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        let name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("")
-            .to_string();
-        let branch_name = if prefix.is_empty() {
-            name
-        } else {
-            format!("{}/{}", prefix, name)
-        };
-        if path.is_file() {
-            let tip = std::fs::read_to_string(&path)?.trim().to_string();
-            result.push((branch_name, tip));
-        } else if path.is_dir() {
-            result.extend(collect_refs(&path, &branch_name)?);
-        }
-    }
-    Ok(result)
-}
 
 /// A commit node in the DAG with its metadata.
 struct GraphCommit {
@@ -171,10 +165,10 @@ fn collect_dag(
             parents,
         });
 
-        if let Some(max) = limit {
-            if commits.len() >= max {
-                break;
-            }
+        if let Some(max) = limit
+            && commits.len() >= max
+        {
+            break;
         }
     }
 
@@ -339,9 +333,9 @@ fn build_merge_line(
     // Draw horizontal connections in the merge range.
     let start_pos = min_col * 2;
     let end_pos = max_col * 2;
-    for p in start_pos..=end_pos {
-        if line[p] == ' ' {
-            line[p] = '─';
+    for ch in line.iter_mut().take(end_pos + 1).skip(start_pos) {
+        if *ch == ' ' {
+            *ch = '─';
         }
     }
 
@@ -376,10 +370,11 @@ fn run_graph(
     from: Option<String>,
     full_hash: bool,
     all: bool,
+    json_output: bool,
 ) -> Result<()> {
     let start_hashes = if all {
         // Collect all branch tips.
-        let branches = list_branches(repo_path)?;
+        let branches = list_branch_tips(repo_path, true)?;
         if branches.is_empty() {
             return Ok(());
         }
@@ -401,9 +396,44 @@ fn run_graph(
         return Ok(());
     }
 
+    if json_output {
+        let out: Vec<_> = commits
+            .iter()
+            .map(|gc| {
+                let cwr = CommitWithRefs {
+                    commit: gc.commit.clone(),
+                    refs: gc.refs.clone(),
+                };
+                json_commit(&cwr, full_hash)
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&json!({ "commits": out }))?);
+        return Ok(());
+    }
+
     render_graph(&commits, full_hash);
 
     Ok(())
+}
+
+fn json_commit(cwr: &CommitWithRefs, full_hash: bool) -> serde_json::Value {
+    let hash_full = cwr
+        .commit
+        .hash
+        .as_deref()
+        .unwrap_or("0000000000000000000000000000000000000000000000000000000000000000");
+    let hash = repo_layout::format_commit_hash(hash_full, full_hash);
+
+    json!({
+        "hash": hash,
+        "hash_full": hash_full,
+        "refs": cwr.refs,
+        "author": cwr.commit.author,
+        "author_email": cwr.commit.author_email,
+        "author_date": cwr.commit.author_date.to_rfc3339(),
+        "message": cwr.commit.message,
+        "parents": cwr.commit.parents,
+    })
 }
 
 // ---------------------------------------------------------------------------

@@ -331,7 +331,7 @@ enum TopLevel {
         #[arg(long)]
         path: Option<PathBuf>,
 
-        /// Output format: table (default) or json
+        /// Output format: table (default) or json. Overrides the global --json flag.
         #[arg(long, value_parser = ["table", "json"])]
         output: Option<String>,
     },
@@ -430,6 +430,18 @@ enum StorageAction {
 // ---------------------------------------------------------------------------
 // Run entry point
 // ---------------------------------------------------------------------------
+
+/// Resolve the output format for commands that support `--output`.
+///
+/// Precedence: explicit `--output` wins; otherwise falls back to global `--json`;
+/// otherwise defaults to `"table"`.
+fn resolve_output_format(cmd_output: Option<String>, json_output: bool) -> String {
+    match cmd_output {
+        Some(fmt) => fmt,
+        None if json_output => "json".to_string(),
+        None => "table".to_string(),
+    }
+}
 
 fn command_name(cmd: &TopLevel) -> &'static str {
     match cmd {
@@ -544,7 +556,8 @@ where
                 checkout,
                 path,
             } => {
-                commands::cmd_branch::run(path, name, start_point, delete, checkout).await?;
+                commands::cmd_branch::run(path, name, start_point, delete, checkout, json_output)
+                    .await?;
                 Ok(0)
             }
             TopLevel::Export {
@@ -566,7 +579,8 @@ where
                 Ok(0)
             }
             TopLevel::Providers { provider } => {
-                commands::cmd_providers::run(provider).map_err(|e| anyhow::anyhow!("{}", e))?;
+                commands::cmd_providers::run(provider, json_output)
+                    .map_err(|e| anyhow::anyhow!("{}", e))?;
                 Ok(0)
             }
             TopLevel::Log {
@@ -578,15 +592,21 @@ where
                 graph,
                 all,
             } => {
-                commands::cmd_log::log(path, max_count, from, until, full_hash, graph, all).await?;
+                commands::cmd_log::log(commands::cmd_log::LogArgs {
+                    path,
+                    max_count,
+                    from,
+                    until,
+                    full_hash,
+                    graph,
+                    all,
+                    json_output,
+                })
+                .await?;
                 Ok(0)
             }
             TopLevel::Status { path, output } => {
-                let output = match output {
-                    Some(o) => o,
-                    None if json_output => "json".to_string(),
-                    None => "table".to_string(),
-                };
+                let output = resolve_output_format(output, json_output);
                 let exit_code = commands::cmd_status::run(path, output).await?;
                 Ok(exit_code)
             }
@@ -630,11 +650,11 @@ where
                 }
             },
             TopLevel::Storage { action } => {
-                run_storage(action).await?;
+                run_storage(action, json_output).await?;
                 Ok(0)
             }
             TopLevel::Compute { path, action } => {
-                run_compute(path, action).await?;
+                run_compute(path, action, json_output).await?;
                 Ok(0)
             }
             TopLevel::Mcp { path, action } => {
@@ -682,25 +702,26 @@ where
 // Storage dispatch
 // ---------------------------------------------------------------------------
 
-async fn run_storage(action: StorageAction) -> Result<()> {
+async fn run_storage(action: StorageAction, json_output: bool) -> Result<()> {
     #[cfg(target_os = "macos")]
     {
         use gfs_storage_apfs::ApfsStorage;
         let storage = ApfsStorage::new();
-        dispatch_storage(&storage, action).await
+        dispatch_storage(&storage, action, json_output).await
     }
 
     #[cfg(not(target_os = "macos"))]
     {
         use gfs_storage_file::FileStorage;
         let storage = FileStorage::new();
-        dispatch_storage(&storage, action).await
+        dispatch_storage(&storage, action, json_output).await
     }
 }
 
 async fn dispatch_storage(
     storage: &impl gfs_domain::ports::storage::StoragePort,
     action: StorageAction,
+    json_output: bool,
 ) -> Result<()> {
     match action {
         StorageAction::Mount { id, mount_point } => {
@@ -708,25 +729,47 @@ async fn dispatch_storage(
                 .mount(&VolumeId(id), &mount_point)
                 .await
                 .map_err(anyhow::Error::from)?;
-            println!("mounted");
+            if json_output {
+                println!("{}", serde_json::to_string_pretty(&json!({"status":"mounted"}))?);
+            } else {
+                println!("mounted");
+            }
         }
         StorageAction::Unmount { id } => {
             storage
                 .unmount(&VolumeId(id))
                 .await
                 .map_err(anyhow::Error::from)?;
-            println!("unmounted");
+            if json_output {
+                println!("{}", serde_json::to_string_pretty(&json!({"status":"unmounted"}))?);
+            } else {
+                println!("unmounted");
+            }
         }
         StorageAction::Snapshot { id, label } => {
             let snap = storage
                 .snapshot(&VolumeId(id), SnapshotOptions { label })
                 .await
                 .map_err(anyhow::Error::from)?;
-            println!("snapshot id  : {}", snap.id);
-            println!("volume       : {}", snap.volume_id);
-            println!("created_at   : {}", snap.created_at);
-            if let Some(lbl) = &snap.label {
-                println!("label        : {lbl}");
+            if json_output {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!({
+                        "snapshot": {
+                            "id": snap.id.to_string(),
+                            "volume_id": snap.volume_id.to_string(),
+                            "created_at": snap.created_at.to_string(),
+                            "label": snap.label,
+                        }
+                    }))?
+                );
+            } else {
+                println!("snapshot id  : {}", snap.id);
+                println!("volume       : {}", snap.volume_id);
+                println!("created_at   : {}", snap.created_at);
+                if let Some(lbl) = &snap.label {
+                    println!("label        : {lbl}");
+                }
             }
         }
         StorageAction::Clone {
@@ -741,45 +784,76 @@ async fn dispatch_storage(
                 .clone(&VolumeId(source), VolumeId(target), opts)
                 .await
                 .map_err(anyhow::Error::from)?;
-            print_volume_status(&status);
+            print_volume_status(&status, json_output)?;
         }
         StorageAction::Status { id } => {
             let status = storage
                 .status(&VolumeId(id))
                 .await
                 .map_err(anyhow::Error::from)?;
-            print_volume_status(&status);
+            print_volume_status(&status, json_output)?;
         }
         StorageAction::Quota { id } => {
             let quota = storage
                 .quota(&VolumeId(id))
                 .await
                 .map_err(anyhow::Error::from)?;
-            println!("volume      : {}", quota.volume_id);
-            println!("limit_bytes : {}", quota.limit_bytes);
-            println!("used_bytes  : {}", quota.used_bytes);
-            println!("free_bytes  : {}", quota.free_bytes);
+            if json_output {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!({
+                        "quota": {
+                            "volume_id": quota.volume_id.to_string(),
+                            "limit_bytes": quota.limit_bytes,
+                            "used_bytes": quota.used_bytes,
+                            "free_bytes": quota.free_bytes,
+                        }
+                    }))?
+                );
+            } else {
+                println!("volume      : {}", quota.volume_id);
+                println!("limit_bytes : {}", quota.limit_bytes);
+                println!("used_bytes  : {}", quota.used_bytes);
+                println!("free_bytes  : {}", quota.free_bytes);
+            }
         }
     }
     Ok(())
 }
 
-async fn run_compute(path: Option<PathBuf>, action: ComputeAction) -> Result<()> {
-    commands::cmd_compute::run(path, action).await
+async fn run_compute(path: Option<PathBuf>, action: ComputeAction, json_output: bool) -> Result<()> {
+    commands::cmd_compute::run(path, action, json_output).await
 }
 
-fn print_volume_status(s: &gfs_domain::ports::storage::VolumeStatus) {
-    println!("id          : {}", s.id);
-    println!(
-        "mount_point : {}",
-        s.mount_point
-            .as_deref()
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|| "-".to_owned())
-    );
-    println!("status      : {:?}", s.status);
-    println!("size_bytes  : {}", s.size_bytes);
-    println!("used_bytes  : {}", s.used_bytes);
+fn print_volume_status(s: &gfs_domain::ports::storage::VolumeStatus, json_output: bool) -> Result<()> {
+    if json_output {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "volume": {
+                    "id": s.id.to_string(),
+                    "mount_point": s.mount_point.as_deref().map(|p| p.display().to_string()),
+                    "status": format!("{:?}", s.status),
+                    "size_bytes": s.size_bytes,
+                    "used_bytes": s.used_bytes,
+                }
+            }))?
+        );
+        Ok(())
+    } else {
+        println!("id          : {}", s.id);
+        println!(
+            "mount_point : {}",
+            s.mount_point
+                .as_deref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "-".to_owned())
+        );
+        println!("status      : {:?}", s.status);
+        println!("size_bytes  : {}", s.size_bytes);
+        println!("used_bytes  : {}", s.used_bytes);
+        Ok(())
+    }
 }
 
 #[cfg(test)]

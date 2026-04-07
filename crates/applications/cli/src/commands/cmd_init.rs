@@ -50,7 +50,7 @@ pub async fn init(
         .await?;
 
     let mut connection_string: Option<String> = None;
-    if has_provider {
+    if has_provider && let Some(compute) = compute.clone() {
         let status_uc = StatusRepoUseCase::new(repository, compute, registry);
         if let Ok(status) = status_uc.run(&target_path).await {
             connection_string = status
@@ -78,7 +78,7 @@ pub async fn init(
         );
         println!();
         println!("    {:<16} {}", dimmed("Branch"), cyan("main"));
-        println!("    {:<16} {}", dimmed("Config"), ".gfs/config.toml");
+        println!("    {:<16} .gfs/config.toml", dimmed("Config"));
         if let Some(ref provider) = provider_display {
             println!("    {:<16} {}", dimmed("Provider"), cyan(provider));
         }

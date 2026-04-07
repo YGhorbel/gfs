@@ -1,0 +1,127 @@
+use std::path::Path;
+use std::process::Command;
+
+use serde_json::Value;
+use tempfile::TempDir;
+
+fn gfs_bin() -> &'static str {
+    env!("CARGO_BIN_EXE_gfs")
+}
+
+fn run_gfs(cwd: &Path, args: &[&str]) -> (i32, String, String) {
+    let out = Command::new(gfs_bin())
+        .current_dir(cwd)
+        .args(args)
+        .output()
+        .expect("failed to run gfs");
+
+    let code = out.status.code().unwrap_or(1);
+    let stdout = String::from_utf8(out.stdout).expect("stdout must be utf-8");
+    let stderr = String::from_utf8(out.stderr).expect("stderr must be utf-8");
+    (code, stdout, stderr)
+}
+
+fn assert_stdout_json(stdout: &str) -> Value {
+    assert!(
+        !stdout.trim().is_empty(),
+        "expected non-empty stdout JSON, got empty"
+    );
+    serde_json::from_str::<Value>(stdout).unwrap_or_else(|e| {
+        panic!("stdout is not valid JSON: {e}\n--- stdout ---\n{stdout}");
+    })
+}
+
+#[test]
+fn json_init_stdout_is_json() {
+    let tmp = TempDir::new().unwrap();
+    let (code, stdout, _stderr) = run_gfs(tmp.path(), &["--json", "init", "."]);
+    assert_eq!(code, 0, "expected init to succeed");
+    let v = assert_stdout_json(&stdout);
+    assert!(
+        v.get("branch").is_some() && v.get("path").is_some(),
+        "expected init JSON to have branch + path"
+    );
+}
+
+#[test]
+fn json_status_stdout_is_json() {
+    let tmp = TempDir::new().unwrap();
+    run_gfs(tmp.path(), &["init", "."]);
+
+    let (code, stdout, _stderr) = run_gfs(tmp.path(), &["--json", "status"]);
+    assert_eq!(code, 0, "expected status to succeed");
+    let v = assert_stdout_json(&stdout);
+    assert!(
+        v.get("current_branch").is_some(),
+        "expected status JSON to have current_branch"
+    );
+}
+
+#[test]
+fn json_providers_stdout_is_json() {
+    let tmp = TempDir::new().unwrap();
+    let (code, stdout, _stderr) = run_gfs(tmp.path(), &["--json", "providers"]);
+    assert_eq!(code, 0, "expected providers to succeed");
+    let v = assert_stdout_json(&stdout);
+    assert!(
+        v.get("providers").is_some() || v.get("provider").is_some(),
+        "expected providers JSON to have providers/provider"
+    );
+}
+
+#[test]
+fn json_branch_stdout_is_json_in_empty_repo() {
+    let tmp = TempDir::new().unwrap();
+    run_gfs(tmp.path(), &["init", "."]);
+
+    let (code, stdout, _stderr) = run_gfs(tmp.path(), &["--json", "branch"]);
+    assert_eq!(code, 0, "expected branch list to succeed");
+    let v = assert_stdout_json(&stdout);
+    assert!(
+        v.get("branches").is_some(),
+        "expected branch JSON to have branches"
+    );
+}
+
+#[test]
+fn json_log_stdout_is_json_in_empty_repo() {
+    let tmp = TempDir::new().unwrap();
+    run_gfs(tmp.path(), &["init", "."]);
+
+    let (code, stdout, _stderr) = run_gfs(tmp.path(), &["--json", "log"]);
+    assert_eq!(code, 0, "expected log to succeed (empty list ok)");
+    let v = assert_stdout_json(&stdout);
+    assert!(v.get("commits").is_some(), "expected log JSON to have commits");
+}
+
+#[test]
+fn json_error_commit_outside_repo_is_json() {
+    let tmp = TempDir::new().unwrap();
+    let (code, stdout, _stderr) = run_gfs(tmp.path(), &["--json", "commit", "-m", "x"]);
+    assert_eq!(code, 1, "expected commit outside repo to fail");
+    let v = assert_stdout_json(&stdout);
+    assert!(v.get("error").is_some(), "expected error envelope");
+}
+
+#[test]
+fn json_error_checkout_main_on_empty_repo_is_json() {
+    let tmp = TempDir::new().unwrap();
+    run_gfs(tmp.path(), &["init", "."]);
+
+    let (code, stdout, _stderr) = run_gfs(tmp.path(), &["--json", "checkout", "main"]);
+    assert_eq!(code, 1, "expected checkout main on empty repo to fail");
+    let v = assert_stdout_json(&stdout);
+    assert!(v.get("error").is_some(), "expected error envelope");
+}
+
+#[test]
+fn json_error_compute_status_without_config_is_json() {
+    let tmp = TempDir::new().unwrap();
+    run_gfs(tmp.path(), &["init", "."]);
+
+    let (code, stdout, _stderr) = run_gfs(tmp.path(), &["--json", "compute", "status"]);
+    assert_eq!(code, 1, "expected compute status without config to fail");
+    let v = assert_stdout_json(&stdout);
+    assert!(v.get("error").is_some(), "expected error envelope");
+}
+
