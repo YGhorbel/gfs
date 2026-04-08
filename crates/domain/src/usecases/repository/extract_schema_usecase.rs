@@ -372,6 +372,7 @@ mod tests {
             user: None,
             environment: env,
             runtime,
+            storage: None,
         };
         config.save(path).expect("save config");
     }

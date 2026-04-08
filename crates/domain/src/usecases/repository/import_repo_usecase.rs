@@ -543,6 +543,7 @@ mod tests {
             user: None,
             environment: Some(env.clone()),
             runtime: Some(runtime.clone()),
+            storage: None,
         };
         config.save(dir).unwrap();
     }
