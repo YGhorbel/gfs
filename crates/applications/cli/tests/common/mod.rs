@@ -4,4 +4,5 @@
 
 pub mod cli_runner;
 pub mod clickhouse;
+pub mod container_runtime;
 pub mod postgres;

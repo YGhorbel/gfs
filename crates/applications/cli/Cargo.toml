@@ -32,7 +32,8 @@ name = "schema_extract_clickhouse"
 path = "tests/schema/extract_clickhouse.rs"
 
 [dependencies]
-gfs-domain = { workspace = true }
+gfs-domain     = { workspace = true }
+gfs-telemetry  = { workspace = true }
 gfs-compute-docker        = { workspace = true }
 gfs-storage-file   = { workspace = true }
 gfs-mcp            = { workspace = true }
@@ -40,6 +41,7 @@ chrono             = { workspace = true }
 clap               = { workspace = true }
 tokio              = { workspace = true }
 anyhow             = { workspace = true }
+async-trait        = { workspace = true }
 tracing            = { workspace = true }
 tracing-subscriber = { workspace = true }
 serde_json         = { workspace = true }

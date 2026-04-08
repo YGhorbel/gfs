@@ -8,11 +8,13 @@ pub mod output;
 
 use std::ffi::OsString;
 use std::path::PathBuf;
-use std::process::ExitCode;
 
 use anyhow::Result;
+use clap::error::ErrorKind;
 use clap::{Parser, Subcommand};
 use gfs_domain::ports::storage::{CloneOptions, SnapshotId, SnapshotOptions, VolumeId};
+use gfs_telemetry::TelemetryClient;
+use serde_json::json;
 
 use crate::output::ColorMode;
 
@@ -104,6 +106,13 @@ pub enum ComputeAction {
         #[arg(long, default_missing_value = "true", num_args = 0..=1)]
         stderr: Option<bool>,
     },
+    /// Read or write a compute config value (e.g. db.port)
+    Config {
+        /// Config key (currently only `db.port` is supported)
+        key: String,
+        /// Value to set
+        value: String,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -140,6 +149,10 @@ struct Cli {
     #[arg(long, global = true, default_value_t = ColorMode::Auto, value_enum)]
     color: ColorMode,
 
+    /// Output machine-readable JSON instead of styled text (for agent/script consumption)
+    #[arg(long, global = true)]
+    json: bool,
+
     #[command(subcommand)]
     command: TopLevel,
 }
@@ -158,6 +171,10 @@ enum TopLevel {
         /// Database version (e.g. 17 for postgres). Required when --database-provider is set.
         #[arg(long)]
         database_version: Option<String>,
+
+        /// Host port to bind for the database container (e.g. 5432). Default: Docker auto-assigns.
+        #[arg(long)]
+        port: Option<u16>,
     },
 
     /// Record a commit of the current repository state
@@ -179,9 +196,13 @@ enum TopLevel {
         author_email: Option<String>,
     },
 
-    /// Read or write repository config (e.g. user.name, user.email)
+    /// Read or write repository or global config (e.g. user.name, user.email)
     Config {
-        /// Path to the GFS repository root (default: current directory)
+        /// Apply to global config (~/.gfs/config.toml) instead of repo-local .gfs/config.toml
+        #[arg(long, short = 'g')]
+        global: bool,
+
+        /// Path to the GFS repository root (default: current directory); ignored with --global
         #[arg(long)]
         path: Option<PathBuf>,
 
@@ -206,6 +227,27 @@ enum TopLevel {
         revision: Option<String>,
     },
 
+    /// List, create, or delete branches
+    Branch {
+        /// Name of the branch to create (omit to list all branches)
+        name: Option<String>,
+
+        /// Commit or branch to start the new branch from (default: HEAD)
+        start_point: Option<String>,
+
+        /// Delete the named branch
+        #[arg(short = 'd', long)]
+        delete: Option<String>,
+
+        /// Switch to the new branch after creating it (like checkout -b)
+        #[arg(short = 'c', long)]
+        checkout: bool,
+
+        /// Path to the GFS repository root (default: current directory)
+        #[arg(long)]
+        path: Option<PathBuf>,
+    },
+
     /// Export data from the running database instance to a file
     Export {
         /// Path to the GFS repository root (default: current directory)
@@ -213,8 +255,9 @@ enum TopLevel {
         path: Option<PathBuf>,
 
         /// Directory where the export file will be written (created if absent)
+        /// Defaults to .gfs/exports/ if not provided
         #[arg(long)]
-        output_dir: PathBuf,
+        output_dir: Option<PathBuf>,
 
         /// Export format (e.g. sql, custom)
         #[arg(long)]
@@ -272,6 +315,14 @@ enum TopLevel {
         /// Show full 64-character commit hashes
         #[arg(long)]
         full_hash: bool,
+
+        /// Draw a text-based graph of the branch topology
+        #[arg(long)]
+        graph: bool,
+
+        /// Show commits from all branches (implies --graph)
+        #[arg(long)]
+        all: bool,
     },
 
     /// Show repository and compute status (current branch, container state, connection string)
@@ -280,9 +331,9 @@ enum TopLevel {
         #[arg(long)]
         path: Option<PathBuf>,
 
-        /// Output format: table (default) or json
-        #[arg(long, default_value = "table", value_parser = ["table", "json"])]
-        output: String,
+        /// Output format: table (default) or json. Overrides the global --json flag.
+        #[arg(long, value_parser = ["table", "json"])]
+        output: Option<String>,
     },
 
     /// Storage operations (mount, unmount, snapshot, clone, status, quota)
@@ -380,9 +431,43 @@ enum StorageAction {
 // Run entry point
 // ---------------------------------------------------------------------------
 
-/// Run the CLI with the given arguments. Returns `Ok(ExitCode::SUCCESS)` on success,
-/// or `Err` with an error message. Use for programmatic invocation and unit tests.
-pub async fn run<I, T>(args: I) -> Result<ExitCode>
+/// Resolve the output format for commands that support `--output`.
+///
+/// Precedence: explicit `--output` wins; otherwise falls back to global `--json`;
+/// otherwise defaults to `"table"`.
+fn resolve_output_format(cmd_output: Option<String>, json_output: bool) -> String {
+    match cmd_output {
+        Some(fmt) => fmt,
+        None if json_output => "json".to_string(),
+        None => "table".to_string(),
+    }
+}
+
+fn command_name(cmd: &TopLevel) -> &'static str {
+    match cmd {
+        TopLevel::Init { .. } => "init",
+        TopLevel::Commit { .. } => "commit",
+        TopLevel::Config { .. } => "config",
+        TopLevel::Checkout { .. } => "checkout",
+        TopLevel::Branch { .. } => "branch",
+        TopLevel::Export { .. } => "export",
+        TopLevel::Import { .. } => "import",
+        TopLevel::Providers { .. } => "providers",
+        TopLevel::Log { .. } => "log",
+        TopLevel::Status { .. } => "status",
+        TopLevel::Query { .. } => "query",
+        TopLevel::Schema { .. } => "schema",
+        TopLevel::Storage { .. } => "storage",
+        TopLevel::Compute { .. } => "compute",
+        TopLevel::Mcp { .. } => "mcp",
+        TopLevel::Version => "version",
+    }
+}
+
+/// Run the CLI with the given arguments. Returns `Ok(exit_code)` on success (0 for most
+/// commands; 1 or 2 for `schema diff` when there are changes). Returns `Err` on failure.
+/// Use for programmatic invocation and unit tests.
+pub async fn run<I, T>(args: I) -> Result<i32>
 where
     I: IntoIterator<Item = T>,
     T: AsRef<str>,
@@ -394,121 +479,249 @@ where
 
     // Init color early so error messages (e.g. parse errors) can use it
     ColorMode::Auto.init();
-    let cli = Cli::try_parse_from(args_os)?;
+    let cli = match Cli::try_parse_from(args_os) {
+        Ok(c) => c,
+        Err(e) if e.kind() == ErrorKind::DisplayVersion || e.kind() == ErrorKind::DisplayHelp => {
+            e.print().expect("writing version/help to stdout/stderr");
+            return Ok(0);
+        }
+        Err(e) => return Err(e.into()),
+    };
     cli.color.init();
 
-    match cli.command {
-        TopLevel::Init {
-            path,
-            database_provider,
-            database_version,
-        } => {
-            commands::cmd_init::init(path, database_provider, database_version)
+    // Skip telemetry for Version and Mcp (MCP tracks its own events)
+    let skip_telemetry = matches!(cli.command, TopLevel::Version | TopLevel::Mcp { .. });
+    let cmd_name = command_name(&cli.command);
+    let telemetry = TelemetryClient::new();
+    let source = gfs_telemetry::detect_source();
+    let version = env!("CARGO_PKG_VERSION");
+    let os = std::env::consts::OS;
+
+    // Capture flags before moving cli.command
+    let color = cli.color;
+    let json_output = cli.json;
+
+    let result: Result<i32> = async move {
+        match cli.command {
+            TopLevel::Init {
+                path,
+                database_provider,
+                database_version,
+                port,
+            } => {
+                commands::cmd_init::init(
+                    path,
+                    database_provider,
+                    database_version,
+                    port,
+                    json_output,
+                )
                 .await
                 .map_err(|e| anyhow::anyhow!("{}", e))?;
-        }
-        TopLevel::Commit {
-            message,
-            path,
-            author,
-            author_email,
-        } => commands::cmd_commit::commit(path, message, author, author_email).await?,
-        TopLevel::Config { path, key, value } => {
-            commands::cmd_config::run(path, key, value).map_err(|e| anyhow::anyhow!("{}", e))?;
-        }
-        TopLevel::Checkout {
-            path,
-            create_branch,
-            revision,
-        } => commands::cmd_checkout::checkout(path, revision, create_branch).await?,
-        TopLevel::Export {
-            path,
-            output_dir,
-            format,
-            id,
-        } => commands::cmd_export::run(path, output_dir, format, id).await?,
-        TopLevel::Import {
-            path,
-            file,
-            format,
-            id,
-        } => commands::cmd_import::run(path, file, format, id).await?,
-        TopLevel::Providers { provider } => {
-            commands::cmd_providers::run(provider).map_err(|e| anyhow::anyhow!("{}", e))?;
-        }
-        TopLevel::Log {
-            path,
-            max_count,
-            from,
-            until,
-            full_hash,
-        } => commands::cmd_log::log(path, max_count, from, until, full_hash).await?,
-        TopLevel::Status { path, output } => commands::cmd_status::run(path, output).await?,
-        TopLevel::Query {
-            path,
-            database,
-            query,
-        } => commands::cmd_query::run(path, database, query).await?,
-        TopLevel::Schema { action } => match action {
-            SchemaAction::Extract {
-                path,
-                output,
-                compact,
-            } => commands::cmd_schema::run_extract(path, output, compact).await?,
-            SchemaAction::Show {
-                commit,
-                path,
-                metadata_only,
-                ddl_only,
-            } => commands::cmd_schema::run_show(commit, path, metadata_only, ddl_only).await?,
-            SchemaAction::Diff {
-                commit1,
-                commit2,
-                path,
-                pretty,
-                json,
-                no_color,
-            } => {
-                let no_color = no_color || cli.color == ColorMode::Never;
-                commands::cmd_schema::run_diff(commit1, commit2, path, pretty, json, no_color)
-                    .await?
+                Ok(0)
             }
-        },
-        TopLevel::Storage { action } => run_storage(action).await?,
-        TopLevel::Compute { path, action } => run_compute(path, action).await?,
-        TopLevel::Mcp { path, action } => {
-            let action = action.unwrap_or(McpAction::Stdio);
-            commands::cmd_mcp::run(path, action).await?;
+            TopLevel::Commit {
+                message,
+                path,
+                author,
+                author_email,
+            } => {
+                commands::cmd_commit::commit(path, message, author, author_email, json_output)
+                    .await?;
+                Ok(0)
+            }
+            TopLevel::Config {
+                path,
+                key,
+                value,
+                global,
+            } => {
+                commands::cmd_config::run(path, key, value, global)
+                    .map_err(|e| anyhow::anyhow!("{}", e))?;
+                Ok(0)
+            }
+            TopLevel::Checkout {
+                path,
+                create_branch,
+                revision,
+            } => {
+                commands::cmd_checkout::checkout(path, revision, create_branch, json_output)
+                    .await?;
+                Ok(0)
+            }
+            TopLevel::Branch {
+                name,
+                start_point,
+                delete,
+                checkout,
+                path,
+            } => {
+                commands::cmd_branch::run(path, name, start_point, delete, checkout, json_output)
+                    .await?;
+                Ok(0)
+            }
+            TopLevel::Export {
+                path,
+                output_dir,
+                format,
+                id,
+            } => {
+                commands::cmd_export::run(path, output_dir, format, id, json_output).await?;
+                Ok(0)
+            }
+            TopLevel::Import {
+                path,
+                file,
+                format,
+                id,
+            } => {
+                commands::cmd_import::run(path, file, format, id, json_output).await?;
+                Ok(0)
+            }
+            TopLevel::Providers { provider } => {
+                commands::cmd_providers::run(provider, json_output)
+                    .map_err(|e| anyhow::anyhow!("{}", e))?;
+                Ok(0)
+            }
+            TopLevel::Log {
+                path,
+                max_count,
+                from,
+                until,
+                full_hash,
+                graph,
+                all,
+            } => {
+                commands::cmd_log::log(commands::cmd_log::LogArgs {
+                    path,
+                    max_count,
+                    from,
+                    until,
+                    full_hash,
+                    graph,
+                    all,
+                    json_output,
+                })
+                .await?;
+                Ok(0)
+            }
+            TopLevel::Status { path, output } => {
+                let output = resolve_output_format(output, json_output);
+                let exit_code = commands::cmd_status::run(path, output).await?;
+                Ok(exit_code)
+            }
+            TopLevel::Query {
+                path,
+                database,
+                query,
+            } => {
+                commands::cmd_query::run(path, database, query).await?;
+                Ok(0)
+            }
+            TopLevel::Schema { action } => match action {
+                SchemaAction::Extract {
+                    path,
+                    output,
+                    compact,
+                } => {
+                    commands::cmd_schema::run_extract(path, output, compact).await?;
+                    Ok(0)
+                }
+                SchemaAction::Show {
+                    commit,
+                    path,
+                    metadata_only,
+                    ddl_only,
+                } => {
+                    commands::cmd_schema::run_show(commit, path, metadata_only, ddl_only).await?;
+                    Ok(0)
+                }
+                SchemaAction::Diff {
+                    commit1,
+                    commit2,
+                    path,
+                    pretty,
+                    json,
+                    no_color,
+                } => {
+                    let no_color = no_color || color == ColorMode::Never;
+                    commands::cmd_schema::run_diff(commit1, commit2, path, pretty, json, no_color)
+                        .await
+                }
+            },
+            TopLevel::Storage { action } => {
+                run_storage(action, json_output).await?;
+                Ok(0)
+            }
+            TopLevel::Compute { path, action } => {
+                run_compute(path, action, json_output).await?;
+                Ok(0)
+            }
+            TopLevel::Mcp { path, action } => {
+                let action = action.unwrap_or(McpAction::Stdio);
+                commands::cmd_mcp::run(path, action).await?;
+                Ok(0)
+            }
+            TopLevel::Version => {
+                commands::cmd_version::run();
+                Ok(0)
+            }
         }
-        TopLevel::Version => commands::cmd_version::run(),
+    }
+    .await;
+
+    if !skip_telemetry {
+        if let Err(ref e) = result {
+            telemetry.track(
+                "command_failed",
+                vec![
+                    ("command", json!(cmd_name)),
+                    ("source", json!(source)),
+                    ("version", json!(version)),
+                    ("os", json!(os)),
+                    ("error_category", json!(gfs_telemetry::error_category(e))),
+                ],
+            );
+        } else {
+            telemetry.track(
+                "command_executed",
+                vec![
+                    ("command", json!(cmd_name)),
+                    ("source", json!(source)),
+                    ("version", json!(version)),
+                    ("os", json!(os)),
+                ],
+            );
+        }
     }
 
-    Ok(ExitCode::SUCCESS)
+    result
 }
 
 // ---------------------------------------------------------------------------
 // Storage dispatch
 // ---------------------------------------------------------------------------
 
-async fn run_storage(action: StorageAction) -> Result<()> {
+async fn run_storage(action: StorageAction, json_output: bool) -> Result<()> {
     #[cfg(target_os = "macos")]
     {
         use gfs_storage_apfs::ApfsStorage;
         let storage = ApfsStorage::new();
-        dispatch_storage(&storage, action).await
+        dispatch_storage(&storage, action, json_output).await
     }
 
     #[cfg(not(target_os = "macos"))]
     {
         use gfs_storage_file::FileStorage;
         let storage = FileStorage::new();
-        dispatch_storage(&storage, action).await
+        dispatch_storage(&storage, action, json_output).await
     }
 }
 
 async fn dispatch_storage(
     storage: &impl gfs_domain::ports::storage::StoragePort,
     action: StorageAction,
+    json_output: bool,
 ) -> Result<()> {
     match action {
         StorageAction::Mount { id, mount_point } => {
@@ -516,25 +729,53 @@ async fn dispatch_storage(
                 .mount(&VolumeId(id), &mount_point)
                 .await
                 .map_err(anyhow::Error::from)?;
-            println!("mounted");
+            if json_output {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!({"status":"mounted"}))?
+                );
+            } else {
+                println!("mounted");
+            }
         }
         StorageAction::Unmount { id } => {
             storage
                 .unmount(&VolumeId(id))
                 .await
                 .map_err(anyhow::Error::from)?;
-            println!("unmounted");
+            if json_output {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!({"status":"unmounted"}))?
+                );
+            } else {
+                println!("unmounted");
+            }
         }
         StorageAction::Snapshot { id, label } => {
             let snap = storage
                 .snapshot(&VolumeId(id), SnapshotOptions { label })
                 .await
                 .map_err(anyhow::Error::from)?;
-            println!("snapshot id  : {}", snap.id);
-            println!("volume       : {}", snap.volume_id);
-            println!("created_at   : {}", snap.created_at);
-            if let Some(lbl) = &snap.label {
-                println!("label        : {lbl}");
+            if json_output {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!({
+                        "snapshot": {
+                            "id": snap.id.to_string(),
+                            "volume_id": snap.volume_id.to_string(),
+                            "created_at": snap.created_at.to_string(),
+                            "label": snap.label,
+                        }
+                    }))?
+                );
+            } else {
+                println!("snapshot id  : {}", snap.id);
+                println!("volume       : {}", snap.volume_id);
+                println!("created_at   : {}", snap.created_at);
+                if let Some(lbl) = &snap.label {
+                    println!("label        : {lbl}");
+                }
             }
         }
         StorageAction::Clone {
@@ -549,45 +790,83 @@ async fn dispatch_storage(
                 .clone(&VolumeId(source), VolumeId(target), opts)
                 .await
                 .map_err(anyhow::Error::from)?;
-            print_volume_status(&status);
+            print_volume_status(&status, json_output)?;
         }
         StorageAction::Status { id } => {
             let status = storage
                 .status(&VolumeId(id))
                 .await
                 .map_err(anyhow::Error::from)?;
-            print_volume_status(&status);
+            print_volume_status(&status, json_output)?;
         }
         StorageAction::Quota { id } => {
             let quota = storage
                 .quota(&VolumeId(id))
                 .await
                 .map_err(anyhow::Error::from)?;
-            println!("volume      : {}", quota.volume_id);
-            println!("limit_bytes : {}", quota.limit_bytes);
-            println!("used_bytes  : {}", quota.used_bytes);
-            println!("free_bytes  : {}", quota.free_bytes);
+            if json_output {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!({
+                        "quota": {
+                            "volume_id": quota.volume_id.to_string(),
+                            "limit_bytes": quota.limit_bytes,
+                            "used_bytes": quota.used_bytes,
+                            "free_bytes": quota.free_bytes,
+                        }
+                    }))?
+                );
+            } else {
+                println!("volume      : {}", quota.volume_id);
+                println!("limit_bytes : {}", quota.limit_bytes);
+                println!("used_bytes  : {}", quota.used_bytes);
+                println!("free_bytes  : {}", quota.free_bytes);
+            }
         }
     }
     Ok(())
 }
 
-async fn run_compute(path: Option<PathBuf>, action: ComputeAction) -> Result<()> {
-    commands::cmd_compute::run(path, action).await
+async fn run_compute(
+    path: Option<PathBuf>,
+    action: ComputeAction,
+    json_output: bool,
+) -> Result<()> {
+    commands::cmd_compute::run(path, action, json_output).await
 }
 
-fn print_volume_status(s: &gfs_domain::ports::storage::VolumeStatus) {
-    println!("id          : {}", s.id);
-    println!(
-        "mount_point : {}",
-        s.mount_point
-            .as_deref()
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|| "-".to_owned())
-    );
-    println!("status      : {:?}", s.status);
-    println!("size_bytes  : {}", s.size_bytes);
-    println!("used_bytes  : {}", s.used_bytes);
+fn print_volume_status(
+    s: &gfs_domain::ports::storage::VolumeStatus,
+    json_output: bool,
+) -> Result<()> {
+    if json_output {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "volume": {
+                    "id": s.id.to_string(),
+                    "mount_point": s.mount_point.as_deref().map(|p| p.display().to_string()),
+                    "status": s.status,
+                    "size_bytes": s.size_bytes,
+                    "used_bytes": s.used_bytes,
+                }
+            }))?
+        );
+        Ok(())
+    } else {
+        println!("id          : {}", s.id);
+        println!(
+            "mount_point : {}",
+            s.mount_point
+                .as_deref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "-".to_owned())
+        );
+        println!("status      : {:?}", s.status);
+        println!("size_bytes  : {}", s.size_bytes);
+        println!("used_bytes  : {}", s.used_bytes);
+        Ok(())
+    }
 }
 
 #[cfg(test)]

@@ -5,13 +5,12 @@
 #![allow(dead_code)]
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::thread;
 use std::time::Duration;
 
 use super::cli_runner;
 use gfs_domain::repo_utils::repo_layout;
-use tempfile::TempDir;
+use tempfile::Builder;
 
 pub fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..")
@@ -23,8 +22,12 @@ struct ContainerCleanupGuard(String);
 
 impl Drop for ContainerCleanupGuard {
     fn drop(&mut self) {
-        let _ = Command::new("docker").args(["stop", &self.0]).output();
-        let _ = Command::new("docker").args(["rm", "-f", &self.0]).output();
+        let _ = super::container_runtime::runtime_command()
+            .args(["stop", &self.0])
+            .output();
+        let _ = super::container_runtime::runtime_command()
+            .args(["rm", "-f", &self.0])
+            .output();
     }
 }
 
@@ -34,13 +37,50 @@ pub fn with_fresh_repo<F>(f: F)
 where
     F: FnOnce(&Path),
 {
-    let temp = TempDir::new().expect("create temp dir for repo");
+    // Use a Docker-shareable temp directory (not /tmp which Docker can't mount on Linux)
+    // Use home directory which is typically Docker-shareable, fall back to system temp
+    let temp_base = std::env::var("HOME")
+        .ok()
+        .map(|h| {
+            let base = PathBuf::from(h).join(".gfs-test-tmp");
+            // Ensure the base directory exists
+            let _ = std::fs::create_dir_all(&base);
+            base
+        })
+        .or_else(|| {
+            // Try /var/tmp as alternative (often Docker-shareable on Linux)
+            let var_tmp = PathBuf::from("/var/tmp");
+            if var_tmp.exists() {
+                Some(var_tmp)
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| {
+            // Last resort: use system temp (may fail on Linux with Docker)
+            std::env::temp_dir()
+        });
+
+    let temp = Builder::new()
+        .prefix("gfs-test-")
+        .tempdir_in(&temp_base)
+        .expect("create temp dir for repo");
     let repo_path = temp.path();
 
     // 1. Init with postgres (in-process for coverage)
+    let (init_ok, init_stdout, init_stderr) = cli_runner::run_gfs(vec![
+        "gfs",
+        "init",
+        "--database-provider",
+        "postgres",
+        "--database-version",
+        "17",
+        repo_path.to_str().unwrap(),
+    ]);
     assert!(
-        cli_runner::gfs_init_with_db(repo_path),
-        "gfs init should succeed"
+        init_ok,
+        "gfs init should succeed\nstdout: {}\nstderr: {}",
+        init_stdout, init_stderr
     );
 
     // 2. Register container for cleanup as soon as we have it (runs on drop, including panic)
@@ -59,7 +99,7 @@ where
 
     // 4. Wait for Postgres before commit (commit runs CHECKPOINT)
     for _ in 0..30 {
-        let ok = Command::new("docker")
+        let ok = super::container_runtime::runtime_command()
             .args([
                 "exec",
                 &container_id,
@@ -96,7 +136,7 @@ pub fn gfs_import(repo_path: &Path, file: &Path, format: Option<&str>) -> (bool,
 }
 
 pub fn run_psql_select(container_id: &str, query: &str) -> String {
-    let out = Command::new("docker")
+    let out = super::container_runtime::runtime_command()
         .args([
             "exec",
             container_id,

@@ -8,9 +8,13 @@
 //!
 //! * Log timestamps are taken from the Docker log frame header (when
 //!   `timestamps=true`); otherwise the current UTC time is used as a fallback.
+//! * On Windows, host bind paths are normalized (extended `\\?\` prefixes are
+//!   stripped) so Docker’s bind parser does not mis-handle `host:container` specs.
 
 pub mod containers;
 mod error;
+
+use std::path::Path;
 
 use async_trait::async_trait;
 use futures_util::{StreamExt, TryStreamExt};
@@ -21,6 +25,27 @@ use gfs_domain::ports::compute::{
 use tracing::instrument;
 
 use crate::error::classify;
+
+/// Host path string suitable for Docker bind mounts. Verbatim Windows paths
+/// (`\\?\...`) break Docker’s `host:container` parsing; map them to normal paths.
+fn host_path_for_docker_bind(path: &Path) -> String {
+    #[cfg(windows)]
+    {
+        let s = path.to_string_lossy();
+        let s = s.as_ref();
+        if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+            return format!(r"\\{}", rest);
+        }
+        if let Some(rest) = s.strip_prefix(r"\\?\") {
+            return rest.to_string();
+        }
+        s.to_string()
+    }
+    #[cfg(not(windows))]
+    {
+        path.to_string_lossy().into_owned()
+    }
+}
 
 // ---------------------------------------------------------------------------
 // DockerCompute
@@ -38,21 +63,104 @@ impl DockerCompute {
     ///
     /// Returns an error if the socket cannot be opened (e.g. Docker is not
     /// running or the socket path has wrong permissions).
-    pub fn new() -> std::result::Result<Self, bollard::errors::Error> {
-        let docker = bollard::Docker::connect_with_local_defaults()?;
-        Ok(Self { docker })
+    pub fn new() -> std::result::Result<Self, ComputeError> {
+        match bollard::Docker::connect_with_local_defaults() {
+            Ok(docker) => Ok(Self { docker }),
+            Err(default_err) => {
+                #[cfg(unix)]
+                if let Some(socket_path) = Self::podman_socket_path() {
+                    let socket = socket_path.to_string_lossy();
+
+                    if let Ok(docker) = bollard::Docker::connect_with_unix(
+                        socket.as_ref(),
+                        120,
+                        bollard::API_DEFAULT_VERSION,
+                    ) {
+                        return Ok(Self { docker });
+                    }
+
+                    let socket_uri = format!("unix://{}", socket);
+                    if let Ok(docker) = bollard::Docker::connect_with_unix(
+                        &socket_uri,
+                        120,
+                        bollard::API_DEFAULT_VERSION,
+                    ) {
+                        return Ok(Self { docker });
+                    }
+                }
+
+                tracing::debug!("Docker connect error: {default_err}");
+                Err(ComputeError::NotAvailable("Docker".to_string()))
+            }
+        }
     }
 
-    fn bind_mount(host_path: &str, container_path: &str) -> String {
-        #[cfg(target_os = "linux")]
+    #[cfg(unix)]
+    fn podman_socket_path() -> Option<std::path::PathBuf> {
+        let from_xdg = std::env::var_os("XDG_RUNTIME_DIR")
+            .map(std::path::PathBuf::from)
+            .map(|dir| dir.join("podman").join("podman.sock"));
+
+        if let Some(path) = from_xdg
+            && path.exists()
         {
-            format!("{host_path}:{container_path}:Z")
+            return Some(path);
         }
 
-        #[cfg(not(target_os = "linux"))]
-        {
-            format!("{host_path}:{container_path}")
+        if let Some(uid) = std::env::var_os("UID") {
+            let path = std::path::PathBuf::from(format!(
+                "/run/user/{}/podman/podman.sock",
+                uid.to_string_lossy()
+            ));
+            if path.exists() {
+                return Some(path);
+            }
         }
+
+        None
+    }
+
+    async fn bind_mount_spec(&self, host_path: &str, container_path: &str) -> String {
+        if self.is_podman_engine().await {
+            // Podman commonly requires SELinux relabeling and uid/gid remapping for bind mounts.
+            // Keep this Podman-specific so Docker behavior stays unchanged.
+            format!("{}:{}:Z,U", host_path, container_path)
+        } else {
+            format!("{}:{}", host_path, container_path)
+        }
+    }
+
+    async fn is_podman_engine(&self) -> bool {
+        let Ok(version) = self.docker.version().await else {
+            return false;
+        };
+
+        if version
+            .version
+            .as_deref()
+            .map(|v| v.to_ascii_lowercase().contains("podman"))
+            .unwrap_or(false)
+        {
+            return true;
+        }
+
+        version
+            .components
+            .unwrap_or_default()
+            .iter()
+            .any(|component| component.name.to_ascii_lowercase().contains("podman"))
+    }
+
+    fn is_container_running(info: &bollard::models::ContainerInspectResponse) -> bool {
+        if info.state.as_ref().and_then(|s| s.running).unwrap_or(false) {
+            return true;
+        }
+
+        info.state
+            .as_ref()
+            .and_then(|s| s.status.as_ref())
+            .map(|s| format!("{s:?}").to_ascii_lowercase().contains("running"))
+            .unwrap_or(false)
     }
 
     async fn wait_for_stable_start(&self, id: &InstanceId) -> Result<InstanceStatus> {
@@ -143,9 +251,9 @@ impl Compute for DockerCompute {
 
         let mut binds = Vec::new();
         if let Some(ref host_data) = definition.host_data_dir {
-            let host_path = host_data.to_string_lossy();
+            let host_path = host_path_for_docker_bind(host_data);
             let container_path = definition.data_dir.to_string_lossy();
-            binds.push(Self::bind_mount(&host_path, &container_path));
+            binds.push(self.bind_mount_spec(&host_path, &container_path).await);
         }
 
         let host_config = bollard::service::HostConfig {
@@ -321,43 +429,19 @@ impl Compute for DockerCompute {
             if cmd.trim().is_empty() {
                 continue;
             }
-            let opts = bollard::exec::CreateExecOptions {
-                cmd: Some(vec!["sh".into(), "-c".into(), cmd.clone()]),
-                attach_stdout: Some(true),
-                attach_stderr: Some(true),
-                ..Default::default()
-            };
-            let exec = self
-                .docker
-                .create_exec(&id.0, opts)
-                .await
-                .map_err(|e| classify(&id.0, e))?;
-            match self
-                .docker
-                .start_exec(&exec.id, None::<bollard::exec::StartExecOptions>)
-                .await
-                .map_err(|e| classify(&id.0, e))?
-            {
-                bollard::exec::StartExecResults::Attached { output, .. } => {
-                    output
-                        .try_collect::<Vec<_>>()
-                        .await
-                        .map_err(|e| classify(&id.0, e))?;
-                }
-                bollard::exec::StartExecResults::Detached => {}
-            }
-            let inspect = self
-                .docker
-                .inspect_exec(&exec.id)
-                .await
-                .map_err(|e| classify(&id.0, e))?;
-            if inspect.exit_code != Some(0) {
-                return Err(gfs_domain::ports::compute::ComputeError::Internal(format!(
-                    "prepare_for_snapshot command failed (exit {:?}): {}",
-                    inspect.exit_code, cmd
-                )));
-            }
+            self.run_exec_command(id, cmd).await?;
         }
+
+        if self.is_podman_engine().await
+            && let Some(data_mount) = self.get_instance_data_mount_container_path(id).await?
+        {
+            // Rootless Podman can map container-owned data files to subordinate UIDs
+            // on the host. Ensure they are host-readable before filesystem snapshot.
+            let escaped = data_mount.replace('\'', "'\"'\"'");
+            let chmod_cmd = format!("chmod -R a+rX '{}'", escaped);
+            self.run_exec_command(id, &chmod_cmd).await?;
+        }
+
         Ok(())
     }
 
@@ -491,6 +575,10 @@ impl Compute for DockerCompute {
             .await
             .map_err(|e| classify(&id.0, e))?;
 
+        if !Self::is_container_running(&info) {
+            return Err(ComputeError::NotRunning(id.0.clone()));
+        }
+
         // Get the container IP on its first available network.
         let ip = info
             .network_settings
@@ -500,7 +588,12 @@ impl Compute for DockerCompute {
             .and_then(|net| net.ip_address.as_ref())
             .filter(|ip| !ip.is_empty())
             .cloned()
-            .unwrap_or_else(|| id.0.clone());
+            .ok_or_else(|| {
+                ComputeError::Internal(format!(
+                    "instance has no task-reachable network IP: '{}'",
+                    id.0
+                ))
+            })?;
 
         // Reuse the env extraction logic from get_connection_info.
         let env = info
@@ -548,10 +641,23 @@ impl Compute for DockerCompute {
                 .inspect_container(&target.0, None)
                 .await
                 .map_err(|e| classify(&target.0, e))?;
-            info.network_settings
+            if !Self::is_container_running(&info) {
+                return Err(ComputeError::NotRunning(target.0.clone()));
+            }
+
+            let network = info
+                .network_settings
                 .as_ref()
                 .and_then(|n| n.networks.as_ref())
                 .and_then(|nets| nets.keys().next().cloned())
+                .ok_or_else(|| {
+                    ComputeError::Internal(format!(
+                        "instance has no network for task linking: '{}'",
+                        target.0
+                    ))
+                })?;
+
+            Some(network)
         } else {
             None
         };
@@ -569,9 +675,9 @@ impl Compute for DockerCompute {
         // 4. Bind mounts for data exchange.
         let mut binds = Vec::new();
         if let Some(ref host_data) = definition.host_data_dir {
-            let host_path = host_data.to_string_lossy();
+            let host_path = host_path_for_docker_bind(host_data);
             let container_path = definition.data_dir.to_string_lossy();
-            binds.push(Self::bind_mount(&host_path, &container_path));
+            binds.push(self.bind_mount_spec(&host_path, &container_path).await);
         }
 
         let host_config = bollard::service::HostConfig {
@@ -685,6 +791,77 @@ impl Compute for DockerCompute {
 // ---------------------------------------------------------------------------
 
 impl DockerCompute {
+    async fn run_exec_command(&self, id: &InstanceId, cmd: &str) -> Result<()> {
+        let opts = bollard::exec::CreateExecOptions {
+            cmd: Some(vec!["sh".into(), "-c".into(), cmd.to_string()]),
+            attach_stdout: Some(true),
+            attach_stderr: Some(true),
+            ..Default::default()
+        };
+        let exec = self
+            .docker
+            .create_exec(&id.0, opts)
+            .await
+            .map_err(|e| classify(&id.0, e))?;
+
+        match self
+            .docker
+            .start_exec(&exec.id, None::<bollard::exec::StartExecOptions>)
+            .await
+            .map_err(|e| classify(&id.0, e))?
+        {
+            bollard::exec::StartExecResults::Attached { output, .. } => {
+                output
+                    .try_collect::<Vec<_>>()
+                    .await
+                    .map_err(|e| classify(&id.0, e))?;
+            }
+            bollard::exec::StartExecResults::Detached => {}
+        }
+
+        let inspect = self
+            .docker
+            .inspect_exec(&exec.id)
+            .await
+            .map_err(|e| classify(&id.0, e))?;
+
+        if inspect.exit_code != Some(0) {
+            return Err(gfs_domain::ports::compute::ComputeError::Internal(format!(
+                "prepare_for_snapshot command failed (exit {:?}): {}",
+                inspect.exit_code, cmd
+            )));
+        }
+
+        Ok(())
+    }
+
+    async fn get_instance_data_mount_container_path(
+        &self,
+        id: &InstanceId,
+    ) -> Result<Option<String>> {
+        let info = self
+            .docker
+            .inspect_container(&id.0, None)
+            .await
+            .map_err(|e| classify(&id.0, e))?;
+
+        let binds = info
+            .host_config
+            .as_ref()
+            .and_then(|h| h.binds.as_ref())
+            .into_iter()
+            .flatten();
+
+        for bind in binds {
+            let parts: Vec<&str> = bind.splitn(3, ':').collect();
+            if parts.len() >= 2 {
+                return Ok(Some(parts[1].trim_end_matches('/').to_string()));
+            }
+        }
+
+        Ok(None)
+    }
+
     /// Wait until the container has reached a not-running state (e.g. exited).
     /// Use after stop_container so the snapshot or remove happens only once the container is fully stopped.
     async fn wait_until_not_running(&self, id: &InstanceId) -> Result<()> {
@@ -705,5 +882,38 @@ impl DockerCompute {
             return Err(ComputeError::Internal(msg));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod host_path_tests {
+    use super::host_path_for_docker_bind;
+    use std::path::Path;
+
+    #[test]
+    #[cfg(windows)]
+    fn strips_verbatim_drive_prefix() {
+        assert_eq!(
+            host_path_for_docker_bind(Path::new(r"\\?\C:\Users\test")),
+            r"C:\Users\test"
+        );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn strips_verbatim_unc_prefix() {
+        assert_eq!(
+            host_path_for_docker_bind(Path::new(r"\\?\UNC\server\share\dir")),
+            r"\\server\share\dir"
+        );
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn passthrough_non_windows() {
+        assert_eq!(
+            host_path_for_docker_bind(Path::new("/tmp/foo/bar")),
+            "/tmp/foo/bar"
+        );
     }
 }
