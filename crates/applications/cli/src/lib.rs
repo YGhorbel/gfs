@@ -106,13 +106,6 @@ pub enum ComputeAction {
         #[arg(long, default_missing_value = "true", num_args = 0..=1)]
         stderr: Option<bool>,
     },
-    /// Read or write a compute config value (e.g. db.port)
-    Config {
-        /// Config key (currently only `db.port` is supported)
-        key: String,
-        /// Value to set
-        value: String,
-    },
 }
 
 // ---------------------------------------------------------------------------
@@ -149,10 +142,6 @@ struct Cli {
     #[arg(long, global = true, default_value_t = ColorMode::Auto, value_enum)]
     color: ColorMode,
 
-    /// Output machine-readable JSON instead of styled text (for agent/script consumption)
-    #[arg(long, global = true)]
-    json: bool,
-
     #[command(subcommand)]
     command: TopLevel,
 }
@@ -171,10 +160,6 @@ enum TopLevel {
         /// Database version (e.g. 17 for postgres). Required when --database-provider is set.
         #[arg(long)]
         database_version: Option<String>,
-
-        /// Host port to bind for the database container (e.g. 5432). Default: Docker auto-assigns.
-        #[arg(long)]
-        port: Option<u16>,
     },
 
     /// Record a commit of the current repository state
@@ -225,27 +210,6 @@ enum TopLevel {
 
         /// Branch name or full 64-char commit hash; or start revision when using -b
         revision: Option<String>,
-    },
-
-    /// List, create, or delete branches
-    Branch {
-        /// Name of the branch to create (omit to list all branches)
-        name: Option<String>,
-
-        /// Commit or branch to start the new branch from (default: HEAD)
-        start_point: Option<String>,
-
-        /// Delete the named branch
-        #[arg(short = 'd', long)]
-        delete: Option<String>,
-
-        /// Switch to the new branch after creating it (like checkout -b)
-        #[arg(short = 'c', long)]
-        checkout: bool,
-
-        /// Path to the GFS repository root (default: current directory)
-        #[arg(long)]
-        path: Option<PathBuf>,
     },
 
     /// Export data from the running database instance to a file
@@ -315,14 +279,6 @@ enum TopLevel {
         /// Show full 64-character commit hashes
         #[arg(long)]
         full_hash: bool,
-
-        /// Draw a text-based graph of the branch topology
-        #[arg(long)]
-        graph: bool,
-
-        /// Show commits from all branches (implies --graph)
-        #[arg(long)]
-        all: bool,
     },
 
     /// Show repository and compute status (current branch, container state, connection string)
@@ -331,9 +287,9 @@ enum TopLevel {
         #[arg(long)]
         path: Option<PathBuf>,
 
-        /// Output format: table (default) or json. Overrides the global --json flag.
-        #[arg(long, value_parser = ["table", "json"])]
-        output: Option<String>,
+        /// Output format: table (default) or json
+        #[arg(long, default_value = "table", value_parser = ["table", "json"])]
+        output: String,
     },
 
     /// Storage operations (mount, unmount, snapshot, clone, status, quota)
@@ -431,25 +387,12 @@ enum StorageAction {
 // Run entry point
 // ---------------------------------------------------------------------------
 
-/// Resolve the output format for commands that support `--output`.
-///
-/// Precedence: explicit `--output` wins; otherwise falls back to global `--json`;
-/// otherwise defaults to `"table"`.
-fn resolve_output_format(cmd_output: Option<String>, json_output: bool) -> String {
-    match cmd_output {
-        Some(fmt) => fmt,
-        None if json_output => "json".to_string(),
-        None => "table".to_string(),
-    }
-}
-
 fn command_name(cmd: &TopLevel) -> &'static str {
     match cmd {
         TopLevel::Init { .. } => "init",
         TopLevel::Commit { .. } => "commit",
         TopLevel::Config { .. } => "config",
         TopLevel::Checkout { .. } => "checkout",
-        TopLevel::Branch { .. } => "branch",
         TopLevel::Export { .. } => "export",
         TopLevel::Import { .. } => "import",
         TopLevel::Providers { .. } => "providers",
@@ -497,9 +440,8 @@ where
     let version = env!("CARGO_PKG_VERSION");
     let os = std::env::consts::OS;
 
-    // Capture flags before moving cli.command
+    // Capture color before moving cli.command (ColorMode is Copy)
     let color = cli.color;
-    let json_output = cli.json;
 
     let result: Result<i32> = async move {
         match cli.command {
@@ -507,17 +449,10 @@ where
                 path,
                 database_provider,
                 database_version,
-                port,
             } => {
-                commands::cmd_init::init(
-                    path,
-                    database_provider,
-                    database_version,
-                    port,
-                    json_output,
-                )
-                .await
-                .map_err(|e| anyhow::anyhow!("{}", e))?;
+                commands::cmd_init::init(path, database_provider, database_version)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{}", e))?;
                 Ok(0)
             }
             TopLevel::Commit {
@@ -526,8 +461,7 @@ where
                 author,
                 author_email,
             } => {
-                commands::cmd_commit::commit(path, message, author, author_email, json_output)
-                    .await?;
+                commands::cmd_commit::commit(path, message, author, author_email).await?;
                 Ok(0)
             }
             TopLevel::Config {
@@ -545,19 +479,7 @@ where
                 create_branch,
                 revision,
             } => {
-                commands::cmd_checkout::checkout(path, revision, create_branch, json_output)
-                    .await?;
-                Ok(0)
-            }
-            TopLevel::Branch {
-                name,
-                start_point,
-                delete,
-                checkout,
-                path,
-            } => {
-                commands::cmd_branch::run(path, name, start_point, delete, checkout, json_output)
-                    .await?;
+                commands::cmd_checkout::checkout(path, revision, create_branch).await?;
                 Ok(0)
             }
             TopLevel::Export {
@@ -566,7 +488,7 @@ where
                 format,
                 id,
             } => {
-                commands::cmd_export::run(path, output_dir, format, id, json_output).await?;
+                commands::cmd_export::run(path, output_dir, format, id).await?;
                 Ok(0)
             }
             TopLevel::Import {
@@ -575,12 +497,11 @@ where
                 format,
                 id,
             } => {
-                commands::cmd_import::run(path, file, format, id, json_output).await?;
+                commands::cmd_import::run(path, file, format, id).await?;
                 Ok(0)
             }
             TopLevel::Providers { provider } => {
-                commands::cmd_providers::run(provider, json_output)
-                    .map_err(|e| anyhow::anyhow!("{}", e))?;
+                commands::cmd_providers::run(provider).map_err(|e| anyhow::anyhow!("{}", e))?;
                 Ok(0)
             }
             TopLevel::Log {
@@ -589,26 +510,13 @@ where
                 from,
                 until,
                 full_hash,
-                graph,
-                all,
             } => {
-                commands::cmd_log::log(commands::cmd_log::LogArgs {
-                    path,
-                    max_count,
-                    from,
-                    until,
-                    full_hash,
-                    graph,
-                    all,
-                    json_output,
-                })
-                .await?;
+                commands::cmd_log::log(path, max_count, from, until, full_hash).await?;
                 Ok(0)
             }
             TopLevel::Status { path, output } => {
-                let output = resolve_output_format(output, json_output);
-                let exit_code = commands::cmd_status::run(path, output).await?;
-                Ok(exit_code)
+                commands::cmd_status::run(path, output).await?;
+                Ok(0)
             }
             TopLevel::Query {
                 path,
@@ -650,11 +558,11 @@ where
                 }
             },
             TopLevel::Storage { action } => {
-                run_storage(action, json_output).await?;
+                run_storage(action).await?;
                 Ok(0)
             }
             TopLevel::Compute { path, action } => {
-                run_compute(path, action, json_output).await?;
+                run_compute(path, action).await?;
                 Ok(0)
             }
             TopLevel::Mcp { path, action } => {
@@ -702,26 +610,25 @@ where
 // Storage dispatch
 // ---------------------------------------------------------------------------
 
-async fn run_storage(action: StorageAction, json_output: bool) -> Result<()> {
+async fn run_storage(action: StorageAction) -> Result<()> {
     #[cfg(target_os = "macos")]
     {
         use gfs_storage_apfs::ApfsStorage;
         let storage = ApfsStorage::new();
-        dispatch_storage(&storage, action, json_output).await
+        dispatch_storage(&storage, action).await
     }
 
     #[cfg(not(target_os = "macos"))]
     {
         use gfs_storage_file::FileStorage;
         let storage = FileStorage::new();
-        dispatch_storage(&storage, action, json_output).await
+        dispatch_storage(&storage, action).await
     }
 }
 
 async fn dispatch_storage(
     storage: &impl gfs_domain::ports::storage::StoragePort,
     action: StorageAction,
-    json_output: bool,
 ) -> Result<()> {
     match action {
         StorageAction::Mount { id, mount_point } => {
@@ -729,53 +636,25 @@ async fn dispatch_storage(
                 .mount(&VolumeId(id), &mount_point)
                 .await
                 .map_err(anyhow::Error::from)?;
-            if json_output {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&json!({"status":"mounted"}))?
-                );
-            } else {
-                println!("mounted");
-            }
+            println!("mounted");
         }
         StorageAction::Unmount { id } => {
             storage
                 .unmount(&VolumeId(id))
                 .await
                 .map_err(anyhow::Error::from)?;
-            if json_output {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&json!({"status":"unmounted"}))?
-                );
-            } else {
-                println!("unmounted");
-            }
+            println!("unmounted");
         }
         StorageAction::Snapshot { id, label } => {
             let snap = storage
                 .snapshot(&VolumeId(id), SnapshotOptions { label })
                 .await
                 .map_err(anyhow::Error::from)?;
-            if json_output {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&json!({
-                        "snapshot": {
-                            "id": snap.id.to_string(),
-                            "volume_id": snap.volume_id.to_string(),
-                            "created_at": snap.created_at.to_string(),
-                            "label": snap.label,
-                        }
-                    }))?
-                );
-            } else {
-                println!("snapshot id  : {}", snap.id);
-                println!("volume       : {}", snap.volume_id);
-                println!("created_at   : {}", snap.created_at);
-                if let Some(lbl) = &snap.label {
-                    println!("label        : {lbl}");
-                }
+            println!("snapshot id  : {}", snap.id);
+            println!("volume       : {}", snap.volume_id);
+            println!("created_at   : {}", snap.created_at);
+            if let Some(lbl) = &snap.label {
+                println!("label        : {lbl}");
             }
         }
         StorageAction::Clone {
@@ -790,83 +669,45 @@ async fn dispatch_storage(
                 .clone(&VolumeId(source), VolumeId(target), opts)
                 .await
                 .map_err(anyhow::Error::from)?;
-            print_volume_status(&status, json_output)?;
+            print_volume_status(&status);
         }
         StorageAction::Status { id } => {
             let status = storage
                 .status(&VolumeId(id))
                 .await
                 .map_err(anyhow::Error::from)?;
-            print_volume_status(&status, json_output)?;
+            print_volume_status(&status);
         }
         StorageAction::Quota { id } => {
             let quota = storage
                 .quota(&VolumeId(id))
                 .await
                 .map_err(anyhow::Error::from)?;
-            if json_output {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&json!({
-                        "quota": {
-                            "volume_id": quota.volume_id.to_string(),
-                            "limit_bytes": quota.limit_bytes,
-                            "used_bytes": quota.used_bytes,
-                            "free_bytes": quota.free_bytes,
-                        }
-                    }))?
-                );
-            } else {
-                println!("volume      : {}", quota.volume_id);
-                println!("limit_bytes : {}", quota.limit_bytes);
-                println!("used_bytes  : {}", quota.used_bytes);
-                println!("free_bytes  : {}", quota.free_bytes);
-            }
+            println!("volume      : {}", quota.volume_id);
+            println!("limit_bytes : {}", quota.limit_bytes);
+            println!("used_bytes  : {}", quota.used_bytes);
+            println!("free_bytes  : {}", quota.free_bytes);
         }
     }
     Ok(())
 }
 
-async fn run_compute(
-    path: Option<PathBuf>,
-    action: ComputeAction,
-    json_output: bool,
-) -> Result<()> {
-    commands::cmd_compute::run(path, action, json_output).await
+async fn run_compute(path: Option<PathBuf>, action: ComputeAction) -> Result<()> {
+    commands::cmd_compute::run(path, action).await
 }
 
-fn print_volume_status(
-    s: &gfs_domain::ports::storage::VolumeStatus,
-    json_output: bool,
-) -> Result<()> {
-    if json_output {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&json!({
-                "volume": {
-                    "id": s.id.to_string(),
-                    "mount_point": s.mount_point.as_deref().map(|p| p.display().to_string()),
-                    "status": s.status,
-                    "size_bytes": s.size_bytes,
-                    "used_bytes": s.used_bytes,
-                }
-            }))?
-        );
-        Ok(())
-    } else {
-        println!("id          : {}", s.id);
-        println!(
-            "mount_point : {}",
-            s.mount_point
-                .as_deref()
-                .map(|p| p.display().to_string())
-                .unwrap_or_else(|| "-".to_owned())
-        );
-        println!("status      : {:?}", s.status);
-        println!("size_bytes  : {}", s.size_bytes);
-        println!("used_bytes  : {}", s.used_bytes);
-        Ok(())
-    }
+fn print_volume_status(s: &gfs_domain::ports::storage::VolumeStatus) {
+    println!("id          : {}", s.id);
+    println!(
+        "mount_point : {}",
+        s.mount_point
+            .as_deref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "-".to_owned())
+    );
+    println!("status      : {:?}", s.status);
+    println!("size_bytes  : {}", s.size_bytes);
+    println!("used_bytes  : {}", s.used_bytes);
 }
 
 #[cfg(test)]

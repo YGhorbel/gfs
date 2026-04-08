@@ -904,7 +904,6 @@ mod tests {
             environment: Some(EnvironmentConfig {
                 database_provider: "mock-db".into(),
                 database_version: "16".into(),
-                database_port: None,
             }),
             ..Default::default()
         };

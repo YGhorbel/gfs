@@ -6,37 +6,21 @@ use anyhow::{Context, Result};
 use gfs_domain::ports::database_provider::{
     DatabaseProviderRegistry, InMemoryDatabaseProviderRegistry, SupportedFeature,
 };
-use serde_json::json;
 
-use crate::output::{
-    TBL_BL, TBL_BR, TBL_CROSS, TBL_T_DOWN, TBL_T_LEFT, TBL_T_RIGHT, TBL_T_UP, TBL_TL, TBL_TR,
-    TBL_V, bold, cyan, tbl_rule,
-};
+use crate::output::{bold, cyan};
 
 // ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
 
-pub fn run(provider_name: Option<String>, json_output: bool) -> Result<()> {
+pub fn run(provider_name: Option<String>) -> Result<()> {
     let registry = Arc::new(InMemoryDatabaseProviderRegistry::new());
     gfs_compute_docker::containers::register_all(registry.as_ref())
         .context("failed to register database providers")?;
 
     match provider_name {
-        Some(name) => {
-            if json_output {
-                print_provider_detail_json(registry.as_ref(), &name)?
-            } else {
-                print_provider_detail(registry.as_ref(), &name)?
-            }
-        }
-        None => {
-            if json_output {
-                print_all_providers_json(registry.as_ref())?
-            } else {
-                print_all_providers(registry.as_ref())?
-            }
-        }
+        Some(name) => print_provider_detail(registry.as_ref(), &name)?,
+        None => print_all_providers(registry.as_ref())?,
     }
     Ok(())
 }
@@ -67,27 +51,6 @@ fn print_all_providers(registry: &impl DatabaseProviderRegistry) -> Result<()> {
     Ok(())
 }
 
-fn print_all_providers_json(registry: &impl DatabaseProviderRegistry) -> Result<()> {
-    let names = registry.list();
-    let providers: Vec<_> = names
-        .into_iter()
-        .filter_map(|name| {
-            let provider = registry.get(&name)?;
-            Some(json!({
-                "name": name,
-                "versions": provider.supported_versions(),
-                "features": provider.supported_features().iter().map(|f| f.id.as_str()).collect::<Vec<_>>(),
-            }))
-        })
-        .collect();
-
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&json!({ "providers": providers }))?
-    );
-    Ok(())
-}
-
 fn print_provider_detail(registry: &impl DatabaseProviderRegistry, name: &str) -> Result<()> {
     let provider = registry
         .get(name)
@@ -106,128 +69,92 @@ fn print_provider_detail(registry: &impl DatabaseProviderRegistry, name: &str) -
     Ok(())
 }
 
-fn print_provider_detail_json(registry: &impl DatabaseProviderRegistry, name: &str) -> Result<()> {
-    let provider = registry
-        .get(name)
-        .ok_or_else(|| anyhow::anyhow!("unknown provider: '{}'", name))?;
-
-    let features = provider.supported_features();
-    let out = json!({
-        "provider": {
-            "name": name,
-            "versions": provider.supported_versions(),
-            "features": features.iter().map(|f| json!({
-                "id": f.id,
-                "description": f.description,
-            })).collect::<Vec<_>>(),
-            "images_source": "docker_hub",
-        }
-    });
-    println!("{}", serde_json::to_string_pretty(&out)?);
-    Ok(())
-}
-
 // ---------------------------------------------------------------------------
-// Output — Unicode box tables
+// Output
 // ---------------------------------------------------------------------------
 
-const COL_PROVIDER: usize = 20;
-const COL_VERSION: usize = 30;
-const COL_FEATURES: usize = 30;
-
+/// Print providers table. Columns: database_provider | version | features
 fn print_providers_table(rows: &[(String, String, String)]) {
-    let cols = [COL_PROVIDER, COL_VERSION, COL_FEATURES];
+    const COL_PROVIDER: usize = 20;
+    const COL_VERSION: usize = 30;
+    const COL_FEATURES: usize = 50;
 
-    // Top border: ┌──────┬──────┬──────┐
-    println!("{}", tbl_rule(&cols, TBL_TL, TBL_T_DOWN, TBL_TR));
-
-    // Header row
-    let h_provider = format!("{:<w$}", "database_provider", w = COL_PROVIDER);
-    let h_version = format!("{:<w$}", "version", w = COL_VERSION);
-    let h_features = format!("{:<w$}", "features", w = COL_FEATURES);
     println!(
-        "  {} {} {} {} {} {} {}",
-        TBL_V,
-        bold(&h_provider),
-        TBL_V,
-        bold(&h_version),
-        TBL_V,
-        bold(&h_features),
-        TBL_V
+        "  {:<provider$} | {:<version$} | {:<features$}",
+        bold("database_provider"),
+        bold("version"),
+        bold("features"),
+        provider = COL_PROVIDER,
+        version = COL_VERSION,
+        features = COL_FEATURES
+    );
+    println!(
+        "  {:<provider$}-+-{:<version$}-+-{:<features$}",
+        "-".repeat(COL_PROVIDER),
+        "-".repeat(COL_VERSION),
+        "-".repeat(COL_FEATURES),
+        provider = COL_PROVIDER,
+        version = COL_VERSION,
+        features = COL_FEATURES
     );
 
-    // Separator: ├──────┼──────┼──────┤
-    println!("{}", tbl_rule(&cols, TBL_T_RIGHT, TBL_CROSS, TBL_T_LEFT));
-
-    // Data rows
     for (name, versions, features) in rows {
-        let p = format!("{:<w$}", name, w = COL_PROVIDER);
-        let v = format!("{:<w$}", truncate(versions, COL_VERSION), w = COL_VERSION);
-        let f = format!("{:<w$}", truncate(features, COL_FEATURES), w = COL_FEATURES);
+        let version_trunc = truncate(versions, COL_VERSION);
+        let features_trunc = truncate(features, COL_FEATURES);
         println!(
-            "  {} {} {} {} {} {} {}",
-            TBL_V,
-            cyan(&p),
-            TBL_V,
-            v,
-            TBL_V,
-            f,
-            TBL_V
+            "  {:<provider$} | {:<version$} | {:<features$}",
+            cyan(name),
+            version_trunc,
+            features_trunc,
+            provider = COL_PROVIDER,
+            version = COL_VERSION,
+            features = COL_FEATURES
         );
     }
-
-    // Bottom border: └──────┴──────┴──────┘
-    println!("{}", tbl_rule(&cols, TBL_BL, TBL_T_UP, TBL_BR));
 
     println!();
     println!("  Images are pulled from Docker Hub by default.");
 }
 
-const COL_FEATURE: usize = 25;
-const COL_DESC: usize = 45;
-
+/// Print features table. Columns: feature | description
 fn print_features_table(features: &[SupportedFeature]) {
-    let cols = [COL_FEATURE, COL_DESC];
+    const COL_FEATURE: usize = 25;
+    const COL_DESC: usize = 55;
 
     println!("  {}", bold("Features"));
-
-    // Top border
-    println!("{}", tbl_rule(&cols, TBL_TL, TBL_T_DOWN, TBL_TR));
-
-    // Header
-    let h_feat = format!("{:<w$}", "feature", w = COL_FEATURE);
-    let h_desc = format!("{:<w$}", "description", w = COL_DESC);
+    println!("  {}", "─".repeat(COL_FEATURE + COL_DESC + 5));
     println!(
-        "  {} {} {} {} {}",
-        TBL_V,
-        bold(&h_feat),
-        TBL_V,
-        bold(&h_desc),
-        TBL_V
+        "  {:<feature$} | {:<desc$}",
+        bold("feature"),
+        bold("description"),
+        feature = COL_FEATURE,
+        desc = COL_DESC
+    );
+    println!(
+        "  {:<feature$}-+-{:<desc$}",
+        "-".repeat(COL_FEATURE),
+        "-".repeat(COL_DESC),
+        feature = COL_FEATURE,
+        desc = COL_DESC
     );
 
-    // Separator
-    println!("{}", tbl_rule(&cols, TBL_T_RIGHT, TBL_CROSS, TBL_T_LEFT));
-
-    // Rows
     for f in features {
-        let feat = format!("{:<w$}", f.id, w = COL_FEATURE);
-        let desc = format!("{:<w$}", truncate(&f.description, COL_DESC), w = COL_DESC);
-        println!("  {} {} {} {} {}", TBL_V, feat, TBL_V, desc, TBL_V);
+        let desc_trunc = truncate(&f.description, COL_DESC);
+        println!(
+            "  {:<feature$} | {:<desc$}",
+            f.id,
+            desc_trunc,
+            feature = COL_FEATURE,
+            desc = COL_DESC
+        );
     }
-
-    // Bottom
-    println!("{}", tbl_rule(&cols, TBL_BL, TBL_T_UP, TBL_BR));
 }
 
 fn truncate(s: impl AsRef<str>, max_len: usize) -> String {
     let s = s.as_ref();
-    let char_len = s.chars().count();
-    if char_len <= max_len {
+    if s.len() <= max_len {
         s.to_string()
     } else {
-        let take = max_len.saturating_sub(1);
-        let prefix: String = s.chars().take(take).collect();
-        format!("{}…", prefix)
+        format!("{}...", &s[..max_len.saturating_sub(3)])
     }
 }

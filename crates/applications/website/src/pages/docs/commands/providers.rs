@@ -18,7 +18,7 @@ pub fn CommandProviders() -> impl IntoView {
             <h3>"List all providers"</h3>
             <CodeBlock code="gfs providers"/>
             <p>"Output:"</p>
-            <pre><code>"  database_provider    | version                        | features                                          \n  ---------------------+--------------------------------+---------------------------------------------------\n  clickhouse           | 24.8.14.39                     | schema, import                                    \n  mysql                | 8.0, 8.1                       | tls, schema, masking, backup, import              \n  postgres             | 13, 14, 15, 16, 17, 18         | tls, schema, masking, auto-scaling, performance...\n\n  Images are pulled from Docker Hub by default."</code></pre>
+            <pre><code>"  database_provider    | version                        | features                                          \n  ---------------------+--------------------------------+---------------------------------------------------\n  mysql                | 8.0, 8.1                       | tls, schema, masking, backup, import              \n  postgres             | 13, 14, 15, 16, 17, 18         | tls, schema, masking, auto-scaling, performance...\n\n  Images are pulled from Docker Hub by default."</code></pre>
 
             <h3>"Show details for a specific provider"</h3>
             <CodeBlock code="gfs providers postgres"/>
@@ -34,12 +34,6 @@ pub fn CommandProviders() -> impl IntoView {
             <ul>
                 <li><strong>"Versions:"</strong>" 8.0, 8.1"</li>
                 <li><strong>"Features:"</strong>" TLS, schema management, data masking, backup, import"</li>
-            </ul>
-
-            <h3>"ClickHouse"</h3>
-            <ul>
-                <li><strong>"Versions:"</strong>" 24.8.14.39"</li>
-                <li><strong>"Features:"</strong>" Schema extraction, schema-aware history, and SQL/CSV import"</li>
             </ul>
 
             <h2>"Use Case"</h2>

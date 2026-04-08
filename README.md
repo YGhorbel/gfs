@@ -49,7 +49,7 @@
 
 ## Important Notice
 
-This project is under active development. Expect changes, incomplete features, and evolving APIs.
+This project is under active development and not yet suitable for production use. Expect breaking changes, incomplete features, and evolving APIs.
 
 ## What is GFS?
 
@@ -452,7 +452,7 @@ cargo build
 Run commands using cargo:
 
 ```bash
-cargo run --bin gfs init --database-provider postgres --database-version 17 [--port 65432]
+cargo run --bin gfs init --database-provider postgres --database-version 17
 cargo run --bin gfs commit -m "v1"
 cargo run --bin gfs log
 cargo run --bin gfs status

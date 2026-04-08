@@ -23,8 +23,6 @@ pub struct UserConfig {
 pub struct EnvironmentConfig {
     pub database_provider: String,
     pub database_version: String,
-    #[serde(default)]
-    pub database_port: Option<u16>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -133,13 +131,9 @@ impl GlobalSettings {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
-
     use super::*;
 
     use crate::model::layout::GFS_DIR;
-
-    static HOME_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn config_load_and_save() {
@@ -158,7 +152,6 @@ mod tests {
             environment: Some(EnvironmentConfig {
                 database_provider: "postgres".into(),
                 database_version: "17".into(),
-                database_port: Some(5432),
             }),
             runtime: Some(RuntimeConfig {
                 runtime_provider: "docker".into(),
@@ -174,10 +167,6 @@ mod tests {
         assert_eq!(
             loaded.environment.as_ref().unwrap().database_provider,
             "postgres"
-        );
-        assert_eq!(
-            loaded.environment.as_ref().unwrap().database_port,
-            Some(5432)
         );
         assert_eq!(loaded.runtime.as_ref().unwrap().container_name, "c1");
     }
@@ -224,9 +213,10 @@ mod tests {
 
     #[test]
     fn global_settings_load_save_roundtrip() {
-        let _home_guard = HOME_TEST_LOCK.lock().unwrap();
+        // Override HOME to a temp directory so we don't touch the real ~/.gfs.
         let dir = tempfile::tempdir().unwrap();
         let home_path = dir.path().to_string_lossy().to_string();
+        // SAFETY: single-threaded test; no other threads read HOME concurrently.
         unsafe { std::env::set_var("HOME", &home_path) };
 
         let settings = GlobalSettings {
@@ -248,9 +238,9 @@ mod tests {
 
     #[test]
     fn global_settings_load_missing_returns_none() {
-        let _home_guard = HOME_TEST_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let home_path = dir.path().to_string_lossy().to_string();
+        // SAFETY: single-threaded test; no other threads read HOME concurrently.
         unsafe { std::env::set_var("HOME", &home_path) };
         assert!(GlobalSettings::load().is_none());
     }

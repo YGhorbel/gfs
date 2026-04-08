@@ -3,9 +3,7 @@ use std::sync::Arc;
 
 use thiserror::Error;
 
-#[cfg(unix)]
 use crate::utils::current_user;
-use crate::utils::data_dir;
 
 use crate::model::config::{EnvironmentConfig, RuntimeConfig};
 use crate::ports::compute::{Compute, ComputeError, StartOptions};
@@ -41,14 +39,14 @@ pub enum InitRepoError {
 /// dyn-compatible (its `register` method uses `impl Into<String>`).
 pub struct InitRepositoryUseCase<R: DatabaseProviderRegistry> {
     repository: Arc<dyn Repository>,
-    compute: Option<Arc<dyn Compute>>,
+    compute: Arc<dyn Compute>,
     registry: Arc<R>,
 }
 
 impl<R: DatabaseProviderRegistry> InitRepositoryUseCase<R> {
     pub fn new(
         repository: Arc<dyn Repository>,
-        compute: Option<Arc<dyn Compute>>,
+        compute: Arc<dyn Compute>,
         registry: Arc<R>,
     ) -> Self {
         Self {
@@ -67,7 +65,6 @@ impl<R: DatabaseProviderRegistry> InitRepositoryUseCase<R> {
         mount_point: Option<String>,
         database_provider: Option<String>,
         database_version: Option<String>,
-        database_port: Option<u16>,
     ) -> std::result::Result<(), InitRepoError> {
         self.repository.init(&path, mount_point).await?;
 
@@ -75,8 +72,7 @@ impl<R: DatabaseProviderRegistry> InitRepositoryUseCase<R> {
             let version = database_version
                 .filter(|v| !v.is_empty())
                 .ok_or(InitRepoError::DatabaseVersionRequired)?;
-            self.deploy_database(&path, provider, version, database_port)
-                .await?;
+            self.deploy_database(&path, provider, version).await?;
         }
 
         Ok(())
@@ -87,14 +83,7 @@ impl<R: DatabaseProviderRegistry> InitRepositoryUseCase<R> {
         repo_path: &std::path::Path,
         provider_name: String,
         database_version: String,
-        database_port: Option<u16>,
     ) -> std::result::Result<(), InitRepoError> {
-        let compute = self.compute.as_ref().ok_or_else(|| {
-            InitRepoError::Compute(ComputeError::Internal(
-                "database provisioning requires a compute runtime".into(),
-            ))
-        })?;
-
         let list = self.registry.list();
         let matched_name = list
             .iter()
@@ -119,26 +108,10 @@ impl<R: DatabaseProviderRegistry> InitRepositoryUseCase<R> {
             .unwrap_or(&definition.image);
         definition.image = format!("{}:{}", base, database_version);
 
-        if let Some(port) = database_port {
-            for mapping in &mut definition.ports {
-                if mapping.compute_port == provider.default_port() {
-                    mapping.host_port = Some(port);
-                }
-            }
-        }
-
         let workspace_data_dir = self
             .repository
             .get_workspace_data_dir_for_head(repo_path)
             .await?;
-        data_dir::prepare_for_database_provider(provider.name(), &workspace_data_dir).map_err(
-            |e| {
-                ComputeError::Internal(format!(
-                    "failed to prepare data dir '{}': {e}",
-                    workspace_data_dir.display()
-                ))
-            },
-        )?;
         definition.host_data_dir = Some(workspace_data_dir);
 
         // Run container as host user so files in bind-mounted data dir are owned by current user.
@@ -148,15 +121,14 @@ impl<R: DatabaseProviderRegistry> InitRepositoryUseCase<R> {
             definition.user = current_user::current_user_uid_gid();
         }
 
-        let id = compute.provision(&definition).await?;
-        compute.start(&id, StartOptions::default()).await?;
+        let id = self.compute.provision(&definition).await?;
+        self.compute.start(&id, StartOptions::default()).await?;
 
         let database_version = provider.version_from_image(&definition);
 
         let environment = EnvironmentConfig {
             database_provider: provider_name,
             database_version,
-            database_port,
         };
         self.repository
             .update_environment_config(repo_path, environment)
@@ -549,11 +521,14 @@ mod tests {
 
     #[tokio::test]
     async fn init_without_database_provider() {
-        let usecase =
-            InitRepositoryUseCase::new(Arc::new(MockRepository), None, Arc::new(MockRegistry));
+        let usecase = InitRepositoryUseCase::new(
+            Arc::new(MockRepository),
+            Arc::new(MockCompute),
+            Arc::new(MockRegistry),
+        );
         let dir = tempfile::tempdir().unwrap();
         let result = usecase
-            .run(dir.path().to_path_buf(), None, None, None, None)
+            .run(dir.path().to_path_buf(), None, None, None)
             .await;
         assert!(result.is_ok());
     }
@@ -562,7 +537,7 @@ mod tests {
     async fn init_with_database_provider() {
         let usecase = InitRepositoryUseCase::new(
             Arc::new(MockRepository),
-            Some(Arc::new(MockCompute)),
+            Arc::new(MockCompute),
             Arc::new(MockRegistry),
         );
         let dir = tempfile::tempdir().unwrap();
@@ -572,7 +547,6 @@ mod tests {
                 None,
                 Some("postgres".into()),
                 Some("17".into()),
-                None,
             )
             .await;
         assert!(result.is_ok());
@@ -582,7 +556,7 @@ mod tests {
     async fn init_database_version_required() {
         let usecase = InitRepositoryUseCase::new(
             Arc::new(MockRepository),
-            Some(Arc::new(MockCompute)),
+            Arc::new(MockCompute),
             Arc::new(MockRegistry),
         );
         let dir = tempfile::tempdir().unwrap();
@@ -591,7 +565,6 @@ mod tests {
                 dir.path().to_path_buf(),
                 None,
                 Some("postgres".into()),
-                None,
                 None,
             )
             .await;
@@ -605,7 +578,7 @@ mod tests {
     async fn init_unknown_database_provider() {
         let usecase = InitRepositoryUseCase::new(
             Arc::new(MockRepository),
-            Some(Arc::new(MockCompute)),
+            Arc::new(MockCompute),
             Arc::new(MockRegistry),
         );
         let dir = tempfile::tempdir().unwrap();
@@ -615,7 +588,6 @@ mod tests {
                 None,
                 Some("mysql".into()),
                 Some("8".into()),
-                None,
             )
             .await;
         assert!(matches!(
@@ -628,18 +600,18 @@ mod tests {
     async fn init_fails_when_repository_already_initialized() {
         let usecase = InitRepositoryUseCase::new(
             Arc::new(GfsRepository::new()),
-            Some(Arc::new(MockCompute)),
+            Arc::new(MockCompute),
             Arc::new(MockRegistry),
         );
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().to_path_buf();
 
         // First init succeeds
-        let first = usecase.run(path.clone(), None, None, None, None).await;
+        let first = usecase.run(path.clone(), None, None, None).await;
         assert!(first.is_ok(), "first init should succeed: {:?}", first);
 
         // Second init fails with AlreadyInitialized
-        let second = usecase.run(path, None, None, None, None).await;
+        let second = usecase.run(path, None, None, None).await;
         assert!(
             matches!(
                 second,

@@ -269,10 +269,6 @@ fn parse_schema_output(stdout: &str) -> Result<ParseSchemaOutput, String> {
         &mut columns,
     )?;
 
-    if version.is_empty() {
-        return Err("missing schema version in extraction output".to_string());
-    }
-
     Ok((version, schemas, tables, columns))
 }
 
@@ -449,20 +445,6 @@ GFS_SCHEMA_TABLES
 
         let result = parse_schema_output(stdout);
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_parse_schema_output_missing_version_fails() {
-        let stdout = r#"GFS_SCHEMA_SCHEMAS
-[]
-GFS_SCHEMA_TABLES
-[]
-GFS_SCHEMA_COLUMNS
-[]"#;
-
-        let result = parse_schema_output(stdout);
-        let err = result.unwrap_err();
-        assert!(err.contains("missing schema version"));
     }
 
     // -----------------------------------------------------------------------
@@ -763,7 +745,6 @@ GFS_SCHEMA_COLUMNS
             Some(EnvironmentConfig {
                 database_provider: "unknown-provider".into(),
                 database_version: "17".into(),
-                database_port: None,
             }),
             Some(RuntimeConfig {
                 runtime_provider: "docker".into(),
@@ -797,7 +778,6 @@ GFS_SCHEMA_COLUMNS
             Some(EnvironmentConfig {
                 database_provider: "mock-schema".into(),
                 database_version: "17".into(),
-                database_port: None,
             }),
             Some(RuntimeConfig {
                 runtime_provider: "docker".into(),
@@ -837,7 +817,6 @@ GFS_SCHEMA_COLUMNS
             Some(EnvironmentConfig {
                 database_provider: "mock-schema".into(),
                 database_version: "17".into(),
-                database_port: None,
             }),
             Some(RuntimeConfig {
                 runtime_provider: "docker".into(),
@@ -902,7 +881,6 @@ GFS_SCHEMA_COLUMNS
             Some(EnvironmentConfig {
                 database_provider: "mock-schema".into(),
                 database_version: "17".into(),
-                database_port: None,
             }),
             Some(RuntimeConfig {
                 runtime_provider: "docker".into(),

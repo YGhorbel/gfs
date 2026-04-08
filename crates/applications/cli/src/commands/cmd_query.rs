@@ -45,9 +45,10 @@ pub async fn run(
     let container_name = &runtime.container_name;
 
     // Set up compute and registry
-    let compute = Arc::new(DockerCompute::new().context(
-        "failed to connect to Docker/Podman daemon (is your container runtime running?)",
-    )?);
+    let compute = Arc::new(
+        DockerCompute::new()
+            .map_err(|e| anyhow::anyhow!("{}", DockerCompute::format_connection_error(&e)))?,
+    );
 
     let registry_impl = InMemoryDatabaseProviderRegistry::new();
     gfs_compute_docker::containers::register_all(&registry_impl)
@@ -77,7 +78,6 @@ pub async fn run(
         let db_env_var = match provider_name.as_str() {
             "postgres" => "POSTGRES_DB",
             "mysql" => "MYSQL_DATABASE",
-            "clickhouse" => "CLICKHOUSE_DB",
             _ => "DATABASE", // fallback for future providers
         };
 
@@ -104,8 +104,7 @@ pub async fn run(
             anyhow::bail!(
                 "database client '{}' not found. Install it to use 'gfs query'.\n  \
                  - PostgreSQL: install postgresql client tools (psql)\n  \
-                 - MySQL: install mysql client tools\n  \
-                 - ClickHouse: install clickhouse client tools (clickhouse-client)",
+                 - MySQL: install mysql client tools",
                 client_name
             )
         } else {

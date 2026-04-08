@@ -8,13 +8,9 @@
 //!
 //! * Log timestamps are taken from the Docker log frame header (when
 //!   `timestamps=true`); otherwise the current UTC time is used as a fallback.
-//! * On Windows, host bind paths are normalized (extended `\\?\` prefixes are
-//!   stripped) so Docker’s bind parser does not mis-handle `host:container` specs.
 
 pub mod containers;
 mod error;
-
-use std::path::Path;
 
 use async_trait::async_trait;
 use futures_util::{StreamExt, TryStreamExt};
@@ -25,27 +21,6 @@ use gfs_domain::ports::compute::{
 use tracing::instrument;
 
 use crate::error::classify;
-
-/// Host path string suitable for Docker bind mounts. Verbatim Windows paths
-/// (`\\?\...`) break Docker’s `host:container` parsing; map them to normal paths.
-fn host_path_for_docker_bind(path: &Path) -> String {
-    #[cfg(windows)]
-    {
-        let s = path.to_string_lossy();
-        let s = s.as_ref();
-        if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
-            return format!(r"\\{}", rest);
-        }
-        if let Some(rest) = s.strip_prefix(r"\\?\") {
-            return rest.to_string();
-        }
-        s.to_string()
-    }
-    #[cfg(not(windows))]
-    {
-        path.to_string_lossy().into_owned()
-    }
-}
 
 // ---------------------------------------------------------------------------
 // DockerCompute
@@ -63,7 +38,7 @@ impl DockerCompute {
     ///
     /// Returns an error if the socket cannot be opened (e.g. Docker is not
     /// running or the socket path has wrong permissions).
-    pub fn new() -> std::result::Result<Self, ComputeError> {
+    pub fn new() -> std::result::Result<Self, bollard::errors::Error> {
         match bollard::Docker::connect_with_local_defaults() {
             Ok(docker) => Ok(Self { docker }),
             Err(default_err) => {
@@ -89,10 +64,76 @@ impl DockerCompute {
                     }
                 }
 
-                tracing::debug!("Docker connect error: {default_err}");
-                Err(ComputeError::NotAvailable("Docker".to_string()))
+                Err(default_err)
             }
         }
+    }
+
+    /// Convert a bollard connection error into a user-friendly error message.
+    /// Detects common connection failure scenarios and provides actionable hints.
+    pub fn format_connection_error(err: &bollard::errors::Error) -> String {
+        let err_str = err.to_string();
+        let err_lower = err_str.to_ascii_lowercase();
+
+        let is_connection_error = err_lower.contains("connect")
+            || err_lower.contains("connection refused")
+            || err_lower.contains("connection reset")
+            || err_lower.contains("no such file")
+            || err_lower.contains("permission denied")
+            || err_lower.contains("hyper legacy client");
+
+        if !is_connection_error {
+            return format!("Docker connection error: {}", err_str);
+        }
+
+        let is_permission_error =
+            err_lower.contains("permission denied") || err_lower.contains("access denied");
+
+        let is_socket_missing =
+            err_lower.contains("no such file") || err_lower.contains("cannot connect");
+
+        #[cfg(unix)]
+        let hints = if is_permission_error {
+            vec![
+                "Docker/Podman daemon is running but current user lacks permissions",
+                "Add your user to the docker group: sudo usermod -aG docker $USER",
+                "Or run with sudo (not recommended for security)",
+                "For Podman rootless: ensure podman socket is accessible",
+            ]
+        } else if is_socket_missing {
+            vec![
+                "Docker/Podman daemon is not running",
+                "Start Docker: sudo systemctl start docker (or start Docker Desktop)",
+                "Start Podman: systemctl --user start podman.socket (for rootless)",
+                "Verify: docker ps or podman ps",
+            ]
+        } else {
+            vec![
+                "Docker/Podman daemon is not accessible",
+                "Check if Docker/Podman service is running",
+                "Verify socket permissions: ls -l /var/run/docker.sock",
+                "For Podman rootless: check XDG_RUNTIME_DIR/podman/podman.sock",
+            ]
+        };
+
+        #[cfg(windows)]
+        let hints = vec![
+            "Docker Desktop is not running",
+            "Start Docker Desktop from the Start menu",
+            "Verify Docker is running: docker ps",
+        ];
+
+        format!(
+            "GFS was not able to connect to Docker/Podman.\n\n\
+            Check the following:\n{}\n\n\
+            Original error: {}",
+            hints
+                .iter()
+                .map(|h| format!("- {}", h))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            err_str
+        )
     }
 
     #[cfg(unix)]
@@ -162,32 +203,6 @@ impl DockerCompute {
             .map(|s| format!("{s:?}").to_ascii_lowercase().contains("running"))
             .unwrap_or(false)
     }
-
-    async fn wait_for_stable_start(&self, id: &InstanceId) -> Result<InstanceStatus> {
-        let mut last = self.status(id).await?;
-        for _ in 0..5 {
-            match last.state {
-                InstanceState::Stopped | InstanceState::Failed => {
-                    return Err(ComputeError::Internal(format!(
-                        "container '{}' exited during startup (exit {:?})",
-                        id.0, last.exit_code
-                    )));
-                }
-                _ => {}
-            }
-
-            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-            last = self.status(id).await?;
-        }
-
-        match last.state {
-            InstanceState::Stopped | InstanceState::Failed => Err(ComputeError::Internal(format!(
-                "container '{}' exited during startup (exit {:?})",
-                id.0, last.exit_code
-            ))),
-            _ => Ok(last),
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -210,11 +225,8 @@ impl Compute for DockerCompute {
             .await
             .map_err(|e| classify(definition.image.as_str(), e))?;
 
-        let image_name = definition.image.to_ascii_lowercase();
-        let prefix = if image_name.contains("mysql") {
+        let prefix = if definition.image.to_ascii_lowercase().contains("mysql") {
             "gfs-mysql"
-        } else if image_name.contains("clickhouse") {
-            "gfs-clickhouse"
         } else {
             "gfs-postgres"
         };
@@ -251,7 +263,7 @@ impl Compute for DockerCompute {
 
         let mut binds = Vec::new();
         if let Some(ref host_data) = definition.host_data_dir {
-            let host_path = host_path_for_docker_bind(host_data);
+            let host_path = host_data.to_string_lossy();
             let container_path = definition.data_dir.to_string_lossy();
             binds.push(self.bind_mount_spec(&host_path, &container_path).await);
         }
@@ -306,7 +318,7 @@ impl Compute for DockerCompute {
             )
             .await
             .map_err(|e| classify(&id.0, e))?;
-        self.wait_for_stable_start(id).await
+        self.status(id).await
     }
 
     #[instrument(skip(self))]
@@ -325,7 +337,7 @@ impl Compute for DockerCompute {
             .restart_container(&id.0, None)
             .await
             .map_err(|e| classify(&id.0, e))?;
-        self.wait_for_stable_start(id).await
+        self.status(id).await
     }
 
     #[instrument(skip(self))]
@@ -675,7 +687,7 @@ impl Compute for DockerCompute {
         // 4. Bind mounts for data exchange.
         let mut binds = Vec::new();
         if let Some(ref host_data) = definition.host_data_dir {
-            let host_path = host_path_for_docker_bind(host_data);
+            let host_path = host_data.to_string_lossy();
             let container_path = definition.data_dir.to_string_lossy();
             binds.push(self.bind_mount_spec(&host_path, &container_path).await);
         }
@@ -886,34 +898,81 @@ impl DockerCompute {
 }
 
 #[cfg(test)]
-mod host_path_tests {
-    use super::host_path_for_docker_bind;
-    use std::path::Path;
+mod tests {
+    use super::*;
 
     #[test]
-    #[cfg(windows)]
-    fn strips_verbatim_drive_prefix() {
-        assert_eq!(
-            host_path_for_docker_bind(Path::new(r"\\?\C:\Users\test")),
-            r"C:\Users\test"
-        );
+    fn test_format_connection_error_connection_refused() {
+        let err = bollard::errors::Error::DockerResponseServerError {
+            status_code: 500,
+            message: "connection refused".to_string(),
+        };
+        let formatted = DockerCompute::format_connection_error(&err);
+        assert!(formatted.contains("GFS was not able to connect to Docker/Podman"));
+        assert!(formatted.contains("Check the following"));
+        assert!(formatted.contains("connection refused"));
     }
 
     #[test]
-    #[cfg(windows)]
-    fn strips_verbatim_unc_prefix() {
-        assert_eq!(
-            host_path_for_docker_bind(Path::new(r"\\?\UNC\server\share\dir")),
-            r"\\server\share\dir"
-        );
+    fn test_format_connection_error_permission_denied() {
+        let err = bollard::errors::Error::DockerResponseServerError {
+            status_code: 403,
+            message: "permission denied".to_string(),
+        };
+        let formatted = DockerCompute::format_connection_error(&err);
+        assert!(formatted.contains("GFS was not able to connect to Docker/Podman"));
+        #[cfg(unix)]
+        {
+            assert!(formatted.contains("permission denied"));
+            assert!(formatted.contains("docker group"));
+        }
     }
 
     #[test]
-    #[cfg(not(windows))]
-    fn passthrough_non_windows() {
-        assert_eq!(
-            host_path_for_docker_bind(Path::new("/tmp/foo/bar")),
-            "/tmp/foo/bar"
-        );
+    fn test_format_connection_error_socket_missing() {
+        let err = bollard::errors::Error::DockerResponseServerError {
+            status_code: 404,
+            message: "no such file or directory".to_string(),
+        };
+        let formatted = DockerCompute::format_connection_error(&err);
+        assert!(formatted.contains("GFS was not able to connect to Docker/Podman"));
+        #[cfg(unix)]
+        {
+            assert!(formatted.contains("not running"));
+            assert!(formatted.contains("systemctl"));
+        }
+    }
+
+    #[test]
+    fn test_format_connection_error_hyper_legacy_client() {
+        let err = bollard::errors::Error::DockerResponseServerError {
+            status_code: 500,
+            message: "Error in the hyper legacy client: client error (Connect)".to_string(),
+        };
+        let formatted = DockerCompute::format_connection_error(&err);
+        assert!(formatted.contains("GFS was not able to connect to Docker/Podman"));
+        assert!(formatted.contains("hyper legacy client"));
+    }
+
+    #[test]
+    fn test_format_connection_error_generic_error() {
+        let err = bollard::errors::Error::DockerResponseServerError {
+            status_code: 500,
+            message: "some other error".to_string(),
+        };
+        let formatted = DockerCompute::format_connection_error(&err);
+        assert!(formatted.contains("Docker connection error"));
+        assert!(formatted.contains("some other error"));
+    }
+
+    #[test]
+    fn test_format_connection_error_includes_original_error() {
+        let err = bollard::errors::Error::DockerResponseServerError {
+            status_code: 500,
+            message: "connection refused".to_string(),
+        };
+        let formatted = DockerCompute::format_connection_error(&err);
+        assert!(formatted.contains("Original error"));
+        assert!(formatted.contains("connection refused"));
     }
 }

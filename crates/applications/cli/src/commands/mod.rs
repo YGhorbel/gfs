@@ -1,4 +1,3 @@
-pub mod cmd_branch;
 pub mod cmd_checkout;
 pub mod cmd_commit;
 pub mod cmd_compute;
@@ -13,4 +12,3 @@ pub mod cmd_query;
 pub mod cmd_schema;
 pub mod cmd_status;
 pub mod cmd_version;
-mod compute_support;

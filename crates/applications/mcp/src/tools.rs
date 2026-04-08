@@ -21,9 +21,6 @@ use gfs_domain::usecases::repository::{
     import_repo_usecase::ImportRepoUseCase, init_repo_usecase::InitRepositoryUseCase,
     log_repo_usecase::LogRepoUseCase, status_repo_usecase::StatusRepoUseCase,
 };
-#[cfg(unix)]
-use gfs_domain::utils::current_user;
-use gfs_domain::utils::data_dir;
 use gfs_telemetry::TelemetryClient;
 use rmcp::{
     ErrorData as McpError, ServerHandler,
@@ -116,10 +113,10 @@ pub struct CheckoutRequest {
 pub struct InitRequest {
     #[schemars(description = "repo root path")]
     pub path: Option<String>,
-    #[schemars(description = "database provider e.g. postgres, mysql, clickhouse")]
+    #[schemars(description = "database provider e.g. postgres, mysql")]
     pub database_provider: Option<String>,
     #[schemars(
-        description = "database version e.g. 17 for postgres, 8.0 for mysql, 24.8.14.39 for clickhouse; required when database_provider is set"
+        description = "database version e.g. 17 for postgres, 8.0 for mysql; required when database_provider is set"
     )]
     pub database_version: Option<String>,
 }
@@ -234,7 +231,7 @@ impl GfsMcpHandler {
     }
 
     #[tool(
-        description = "List supported database providers (e.g. postgres, mysql, clickhouse) and their versions and features. Use when choosing or checking which databases this GFS server can run. Equivalent to gfs providers."
+        description = "List supported database providers (e.g. postgres, mysql) and their versions and features. Use when choosing or checking which databases this GFS server can run. Equivalent to gfs providers."
     )]
     async fn list_providers(
         &self,
@@ -314,7 +311,7 @@ impl GfsMcpHandler {
     }
 
     #[tool(
-        description = "Initialize a new GFS repository backed by a database. Optional: path. If database_provider is set (e.g. postgres, mysql, clickhouse), database_version is required (e.g. 17 for postgres, 24.8.14.39 for clickhouse). Creates repo metadata and can start the database container. Equivalent to gfs init."
+        description = "Initialize a new GFS repository backed by a database. Optional: path. If database_provider is set (e.g. postgres, mysql), database_version is required (e.g. 17 for postgres). Creates repo metadata and can start the database container. Equivalent to gfs init."
     )]
     async fn init(
         &self,
@@ -542,7 +539,10 @@ async fn do_status(args: &serde_json::Value) -> Result<CallToolResult, McpError>
     let repo_path = repo_path_from_value(args);
 
     let repository: Arc<dyn Repository> = Arc::new(GfsRepository::new());
-    let compute = Arc::new(DockerCompute::new().map_err(|e| to_error_data(e.to_string()))?);
+    let compute = Arc::new(
+        DockerCompute::new()
+            .map_err(|e| to_error_data(DockerCompute::format_connection_error(&e).to_string()))?,
+    );
     let registry = Arc::new(InMemoryDatabaseProviderRegistry::new());
     containers::register_all(registry.as_ref())
         .map_err(|e| to_error_data(format!("register providers: {e}")))?;
@@ -593,7 +593,9 @@ async fn do_commit(args: &serde_json::Value) -> Result<CallToolResult, McpError>
         let storage: Arc<dyn StoragePort> = Arc::new(gfs_storage_apfs::ApfsStorage::new());
         let repository: Arc<dyn Repository> = Arc::new(GfsRepository::new());
         let compute: Arc<dyn Compute> =
-            Arc::new(DockerCompute::new().map_err(|e| to_error_data(e.to_string()))?);
+            Arc::new(DockerCompute::new().map_err(|e| {
+                to_error_data(DockerCompute::format_connection_error(&e).to_string())
+            })?);
         let registry = Arc::new(InMemoryDatabaseProviderRegistry::new());
         containers::register_all(registry.as_ref())
             .map_err(|e| to_error_data(format!("register providers: {e}")))?;
@@ -626,7 +628,9 @@ async fn do_commit(args: &serde_json::Value) -> Result<CallToolResult, McpError>
         let storage: Arc<dyn StoragePort> = Arc::new(gfs_storage_file::FileStorage::new());
         let repository: Arc<dyn Repository> = Arc::new(GfsRepository::new());
         let compute: Arc<dyn Compute> =
-            Arc::new(DockerCompute::new().map_err(|e| to_error_data(e.to_string()))?);
+            Arc::new(DockerCompute::new().map_err(|e| {
+                to_error_data(DockerCompute::format_connection_error(&e).to_string())
+            })?);
         let registry = Arc::new(InMemoryDatabaseProviderRegistry::new());
         containers::register_all(registry.as_ref())
             .map_err(|e| to_error_data(format!("register providers: {e}")))?;
@@ -718,8 +722,10 @@ async fn do_checkout(args: &serde_json::Value) -> Result<CallToolResult, McpErro
 
     let repo_path = repo_path_from_value(args);
     let repository: Arc<dyn Repository> = Arc::new(GfsRepository::new());
-    let compute: Arc<dyn Compute> =
-        Arc::new(DockerCompute::new().map_err(|e| to_error_data(e.to_string()))?);
+    let compute: Arc<dyn Compute> = Arc::new(
+        DockerCompute::new()
+            .map_err(|e| to_error_data(DockerCompute::format_connection_error(&e).to_string()))?,
+    );
     let registry = Arc::new(InMemoryDatabaseProviderRegistry::new());
     containers::register_all(registry.as_ref())
         .map_err(|e| to_error_data(format!("register providers: {e}")))?;
@@ -749,13 +755,10 @@ async fn do_init(args: &serde_json::Value) -> Result<CallToolResult, McpError> {
         .map(String::from);
 
     let repository: Arc<dyn Repository> = Arc::new(GfsRepository::new());
-    let compute: Option<Arc<dyn Compute>> = if database_provider.is_some() {
-        Some(Arc::new(
-            DockerCompute::new().map_err(|e| to_error_data(e.to_string()))?,
-        ))
-    } else {
-        None
-    };
+    let compute = Arc::new(
+        DockerCompute::new()
+            .map_err(|e| to_error_data(DockerCompute::format_connection_error(&e).to_string()))?,
+    );
     let registry = Arc::new(InMemoryDatabaseProviderRegistry::new());
     containers::register_all(registry.as_ref())
         .map_err(|e| to_error_data(format!("register providers: {e}")))?;
@@ -767,7 +770,6 @@ async fn do_init(args: &serde_json::Value) -> Result<CallToolResult, McpError> {
             None,
             database_provider.clone(),
             database_version.clone(),
-            None,
         )
         .await
         .map_err(|e| to_error_data(e.to_string()))?;
@@ -807,7 +809,8 @@ async fn do_compute(args: &serde_json::Value) -> Result<CallToolResult, McpError
         }
     };
 
-    let compute = DockerCompute::new().map_err(|e| to_error_data(e.to_string()))?;
+    let compute = DockerCompute::new()
+        .map_err(|e| to_error_data(DockerCompute::format_connection_error(&e).to_string()))?;
     let instance_id = InstanceId(id);
 
     let result = match action {
@@ -996,13 +999,7 @@ async fn start_or_restart(
                 .unwrap_or(&definition.image);
             definition.image = format!("{}:{}", base, env.database_version);
         }
-        data_dir::prepare_for_database_provider(provider.name(), std::path::Path::new(&active))
-            .map_err(|e| to_error_data(format!("failed to prepare data dir '{active}': {e}")))?;
         definition.host_data_dir = Some(std::path::PathBuf::from(&active));
-        #[cfg(unix)]
-        {
-            definition.user = current_user::current_user_uid_gid();
-        }
         let new_id = compute
             .provision(&definition)
             .await
@@ -1075,7 +1072,10 @@ async fn do_export(args: &serde_json::Value) -> Result<CallToolResult, McpError>
         .map(PathBuf::from)
         .unwrap_or_else(default_repo_path);
 
-    let compute = Arc::new(DockerCompute::new().map_err(|e| to_error_data(e.to_string()))?);
+    let compute = Arc::new(
+        DockerCompute::new()
+            .map_err(|e| to_error_data(DockerCompute::format_connection_error(&e).to_string()))?,
+    );
     let registry = Arc::new(InMemoryDatabaseProviderRegistry::new());
     containers::register_all(registry.as_ref())
         .map_err(|e| to_error_data(format!("register providers: {e}")))?;
@@ -1110,7 +1110,10 @@ async fn do_import(args: &serde_json::Value) -> Result<CallToolResult, McpError>
         .unwrap_or("")
         .to_string();
 
-    let compute = Arc::new(DockerCompute::new().map_err(|e| to_error_data(e.to_string()))?);
+    let compute = Arc::new(
+        DockerCompute::new()
+            .map_err(|e| to_error_data(DockerCompute::format_connection_error(&e).to_string()))?,
+    );
     let registry = Arc::new(InMemoryDatabaseProviderRegistry::new());
     containers::register_all(registry.as_ref())
         .map_err(|e| to_error_data(format!("register providers: {e}")))?;
@@ -1153,8 +1156,10 @@ async fn do_query(args: &serde_json::Value) -> Result<CallToolResult, McpError> 
     let provider_name = &environment.database_provider;
     let container_name = &runtime.container_name;
 
-    // Set up compute and registry
-    let compute = Arc::new(DockerCompute::new().map_err(|e| to_error_data(e.to_string()))?);
+    let compute = Arc::new(
+        DockerCompute::new()
+            .map_err(|e| to_error_data(DockerCompute::format_connection_error(&e).to_string()))?,
+    );
 
     let registry = Arc::new(InMemoryDatabaseProviderRegistry::new());
     containers::register_all(registry.as_ref())
@@ -1185,7 +1190,6 @@ async fn do_query(args: &serde_json::Value) -> Result<CallToolResult, McpError> 
         let db_env_var = match provider_name.as_str() {
             "postgres" => "POSTGRES_DB",
             "mysql" => "MYSQL_DATABASE",
-            "clickhouse" => "CLICKHOUSE_DB",
             _ => "DATABASE", // fallback for future providers
         };
 
@@ -1263,7 +1267,10 @@ async fn do_extract_schema(args: &serde_json::Value) -> Result<CallToolResult, M
     let args = if args.is_object() { args } else { &json!({}) };
     let repo_path = repo_path_from_value(args);
 
-    let compute = Arc::new(DockerCompute::new().map_err(|e| to_error_data(e.to_string()))?);
+    let compute = Arc::new(
+        DockerCompute::new()
+            .map_err(|e| to_error_data(DockerCompute::format_connection_error(&e).to_string()))?,
+    );
     let registry = Arc::new(InMemoryDatabaseProviderRegistry::new());
     containers::register_all(registry.as_ref())
         .map_err(|e| to_error_data(format!("register providers: {e}")))?;
