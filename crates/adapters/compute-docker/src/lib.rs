@@ -20,7 +20,8 @@ use async_trait::async_trait;
 use futures_util::{StreamExt, TryStreamExt};
 use gfs_domain::ports::compute::{
     Compute, ComputeDefinition, ComputeError, ExecOutput, InstanceConnectionInfo, InstanceId,
-    InstanceState, InstanceStatus, LogEntry, LogStream, LogsOptions, Result, StartOptions,
+    InstanceState, InstanceStatus, LogEntry, LogStream, LogsOptions, Result, RuntimeDescriptor,
+    StartOptions,
 };
 use tracing::instrument;
 
@@ -45,6 +46,18 @@ fn host_path_for_docker_bind(path: &Path) -> String {
     {
         path.to_string_lossy().into_owned()
     }
+}
+
+fn resolve_host_bind_path(path: &Path) -> Result<std::path::PathBuf> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(ComputeError::Io)?
+            .join(path)
+    };
+
+    Ok(absolute.canonicalize().unwrap_or(absolute))
 }
 
 // ---------------------------------------------------------------------------
@@ -151,6 +164,33 @@ impl DockerCompute {
             .any(|component| component.name.to_ascii_lowercase().contains("podman"))
     }
 
+    async fn describe_runtime_impl(&self) -> Result<RuntimeDescriptor> {
+        let version = self.docker.version().await.map_err(|e| classify("", e))?;
+
+        let is_podman = version
+            .version
+            .as_deref()
+            .map(|v| v.to_ascii_lowercase().contains("podman"))
+            .unwrap_or(false)
+            || version
+                .components
+                .as_ref()
+                .into_iter()
+                .flat_map(|components| components.iter())
+                .any(|component| component.name.to_ascii_lowercase().contains("podman"));
+
+        Ok(RuntimeDescriptor {
+            provider: if is_podman { "podman" } else { "docker" }.to_string(),
+            version: version.version.unwrap_or_else(|| {
+                if is_podman {
+                    "unknown".to_string()
+                } else {
+                    "24".to_string()
+                }
+            }),
+        })
+    }
+
     fn is_container_running(info: &bollard::models::ContainerInspectResponse) -> bool {
         if info.state.as_ref().and_then(|s| s.running).unwrap_or(false) {
             return true;
@@ -185,7 +225,55 @@ impl DockerCompute {
                 "container '{}' exited during startup (exit {:?})",
                 id.0, last.exit_code
             ))),
-            _ => Ok(last),
+            _ => {
+                self.wait_for_ready_ports(id).await;
+                Ok(last)
+            }
+        }
+    }
+
+    async fn wait_for_ready_ports(&self, id: &InstanceId) {
+        let Ok(info) = self.docker.inspect_container(&id.0, None).await else {
+            return;
+        };
+
+        let host_ports: Vec<u16> = info
+            .network_settings
+            .as_ref()
+            .and_then(|settings| settings.ports.as_ref())
+            .into_iter()
+            .flat_map(|ports| ports.values())
+            .flatten()
+            .flatten()
+            .filter_map(|binding| binding.host_port.as_deref())
+            .filter_map(|port| port.parse::<u16>().ok())
+            .collect();
+
+        if host_ports.is_empty() {
+            return;
+        }
+
+        for _ in 0..40 {
+            let mut all_ready = true;
+
+            for port in &host_ports {
+                let ipv4_ready = tokio::net::TcpStream::connect(("127.0.0.1", *port))
+                    .await
+                    .is_ok();
+                let ipv6_ready = tokio::net::TcpStream::connect(("::1", *port)).await.is_ok();
+
+                if !ipv4_ready && !ipv6_ready {
+                    all_ready = false;
+                    break;
+                }
+            }
+
+            if all_ready {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                return;
+            }
+
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
         }
     }
 }
@@ -251,7 +339,7 @@ impl Compute for DockerCompute {
 
         let mut binds = Vec::new();
         if let Some(ref host_data) = definition.host_data_dir {
-            let host_path = host_path_for_docker_bind(host_data);
+            let host_path = host_path_for_docker_bind(&resolve_host_bind_path(host_data)?);
             let container_path = definition.data_dir.to_string_lossy();
             binds.push(self.bind_mount_spec(&host_path, &container_path).await);
         }
@@ -443,6 +531,10 @@ impl Compute for DockerCompute {
         }
 
         Ok(())
+    }
+
+    async fn describe_runtime(&self) -> Result<RuntimeDescriptor> {
+        self.describe_runtime_impl().await
     }
 
     #[instrument(skip(self))]
@@ -675,7 +767,7 @@ impl Compute for DockerCompute {
         // 4. Bind mounts for data exchange.
         let mut binds = Vec::new();
         if let Some(ref host_data) = definition.host_data_dir {
-            let host_path = host_path_for_docker_bind(host_data);
+            let host_path = host_path_for_docker_bind(&resolve_host_bind_path(host_data)?);
             let container_path = definition.data_dir.to_string_lossy();
             binds.push(self.bind_mount_spec(&host_path, &container_path).await);
         }
@@ -887,7 +979,7 @@ impl DockerCompute {
 
 #[cfg(test)]
 mod host_path_tests {
-    use super::host_path_for_docker_bind;
+    use super::{host_path_for_docker_bind, resolve_host_bind_path};
     use std::path::Path;
 
     #[test]
@@ -915,5 +1007,13 @@ mod host_path_tests {
             host_path_for_docker_bind(Path::new("/tmp/foo/bar")),
             "/tmp/foo/bar"
         );
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn resolves_relative_bind_paths_to_absolute() {
+        let current = std::env::current_dir().expect("current dir");
+        let resolved = resolve_host_bind_path(Path::new("target")).expect("resolve relative path");
+        assert_eq!(resolved, current.join("target"));
     }
 }

@@ -8,7 +8,7 @@ use crate::utils::current_user;
 use crate::utils::data_dir;
 
 use crate::model::config::{EnvironmentConfig, RuntimeConfig};
-use crate::ports::compute::{Compute, ComputeError, StartOptions};
+use crate::ports::compute::{Compute, ComputeError, RuntimeDescriptor, StartOptions};
 use crate::ports::database_provider::DatabaseProviderRegistry;
 use crate::ports::repository::{Repository, RepositoryError};
 
@@ -150,6 +150,13 @@ impl<R: DatabaseProviderRegistry> InitRepositoryUseCase<R> {
 
         let id = compute.provision(&definition).await?;
         compute.start(&id, StartOptions::default()).await?;
+        let runtime = compute
+            .describe_runtime()
+            .await
+            .unwrap_or_else(|_| RuntimeDescriptor {
+                provider: "docker".to_string(),
+                version: "24".to_string(),
+            });
 
         let database_version = provider.version_from_image(&definition);
 
@@ -163,8 +170,8 @@ impl<R: DatabaseProviderRegistry> InitRepositoryUseCase<R> {
             .await?;
 
         let runtime = RuntimeConfig {
-            runtime_provider: "docker".to_string(),
-            runtime_version: "24".to_string(),
+            runtime_provider: runtime.provider,
+            runtime_version: runtime.version,
             container_name: id.0.clone(),
         };
         self.repository

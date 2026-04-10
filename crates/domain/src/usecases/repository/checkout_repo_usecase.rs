@@ -10,7 +10,7 @@ use std::sync::Arc;
 use thiserror::Error;
 
 use crate::model::config::RuntimeConfig;
-use crate::ports::compute::{Compute, ComputeError, InstanceId};
+use crate::ports::compute::{Compute, ComputeError, InstanceId, RuntimeDescriptor};
 use crate::ports::database_provider::DatabaseProviderRegistry;
 use crate::ports::repository::{Repository, RepositoryError};
 use crate::utils::{current_user, data_dir};
@@ -225,12 +225,20 @@ impl<R: DatabaseProviderRegistry> CheckoutRepoUseCase<R> {
         }
         let new_id = self.compute.provision(&definition).await?;
         let _ = self.compute.start(&new_id, Default::default()).await?;
+        let runtime = self
+            .compute
+            .describe_runtime()
+            .await
+            .unwrap_or_else(|_| RuntimeDescriptor {
+                provider: "docker".to_string(),
+                version: "24".to_string(),
+            });
         self.repository
             .update_runtime_config(
                 path,
                 RuntimeConfig {
-                    runtime_provider: "docker".to_string(),
-                    runtime_version: "24".to_string(),
+                    runtime_provider: runtime.provider,
+                    runtime_version: runtime.version,
                     container_name: new_id.0.clone(),
                 },
             )

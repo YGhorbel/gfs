@@ -4,7 +4,9 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use gfs_compute_docker::DockerCompute;
 use gfs_domain::model::config::{GfsConfig, RuntimeConfig};
-use gfs_domain::ports::compute::{Compute, InstanceId, InstanceState, InstanceStatus, LogsOptions};
+use gfs_domain::ports::compute::{
+    Compute, InstanceId, InstanceState, InstanceStatus, LogsOptions, RuntimeDescriptor,
+};
 use gfs_domain::ports::database_provider::{
     DatabaseProviderRegistry, InMemoryDatabaseProviderRegistry,
 };
@@ -467,12 +469,19 @@ async fn start_restart_or_recreate(
     }
     let new_id = compute.provision(&definition).await?;
     let status = compute.start(&new_id, Default::default()).await?;
+    let runtime = compute
+        .describe_runtime()
+        .await
+        .unwrap_or(RuntimeDescriptor {
+            provider: "docker".to_string(),
+            version: "24".to_string(),
+        });
 
     repo_layout::update_runtime_config(
         repo_path,
         RuntimeConfig {
-            runtime_provider: "docker".to_string(),
-            runtime_version: "24".to_string(),
+            runtime_provider: runtime.provider,
+            runtime_version: runtime.version,
             container_name: new_id.0.clone(),
         },
     )

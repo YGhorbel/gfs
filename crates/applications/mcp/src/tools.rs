@@ -9,7 +9,9 @@ use gfs_domain::adapters::gfs_repository::GfsRepository;
 use gfs_domain::model::config::{GfsConfig, RuntimeConfig};
 use gfs_domain::model::datasource::diff::compute_schema_diff;
 use gfs_domain::model::datasource::diff_formatter::JsonFormatter;
-use gfs_domain::ports::compute::{Compute, InstanceId, InstanceState, InstanceStatus, LogsOptions};
+use gfs_domain::ports::compute::{
+    Compute, InstanceId, InstanceState, InstanceStatus, LogsOptions, RuntimeDescriptor,
+};
 use gfs_domain::ports::database_provider::{
     ConnectionParams, DatabaseProviderRegistry, InMemoryDatabaseProviderRegistry,
 };
@@ -1051,11 +1053,18 @@ async fn start_or_restart(
             .start(&new_id, Default::default())
             .await
             .map_err(|e| to_error_data(e.to_string()))?;
+        let runtime = compute
+            .describe_runtime()
+            .await
+            .unwrap_or(RuntimeDescriptor {
+                provider: "docker".to_string(),
+                version: "24".to_string(),
+            });
         repo_layout::update_runtime_config(
             repo_path,
             RuntimeConfig {
-                runtime_provider: "docker".to_string(),
-                runtime_version: "24".to_string(),
+                runtime_provider: runtime.provider,
+                runtime_version: runtime.version,
                 container_name: new_id.0.clone(),
             },
         )

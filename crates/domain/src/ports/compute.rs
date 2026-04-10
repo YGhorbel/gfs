@@ -113,6 +113,13 @@ pub struct ExecOutput {
     pub stderr: String,
 }
 
+/// Human-readable description of the connected container runtime.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeDescriptor {
+    pub provider: String,
+    pub version: String,
+}
+
 /// Options controlling how an instance is started.
 #[derive(Debug, Default)]
 pub struct StartOptions {
@@ -251,6 +258,14 @@ pub trait Compute: Send + Sync {
     /// Run the given pre-snapshot commands inside the instance (e.g. database CHECKPOINT).
     /// Commands are executed in order; typically provided by the database provider.
     async fn prepare_for_snapshot(&self, id: &InstanceId, commands: &[String]) -> Result<()>;
+
+    /// Describe the connected container runtime (for example Docker or Podman).
+    async fn describe_runtime(&self) -> Result<RuntimeDescriptor> {
+        Ok(RuntimeDescriptor {
+            provider: "docker".to_string(),
+            version: "24".to_string(),
+        })
+    }
 
     /// Fetch log entries produced by the instance.
     async fn logs(&self, id: &InstanceId, options: LogsOptions) -> Result<Vec<LogEntry>>;
