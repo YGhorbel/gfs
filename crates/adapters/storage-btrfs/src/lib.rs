@@ -1,11 +1,12 @@
 //! Btrfs-backed storage adapter for the [`StoragePort`] port.
 //!
-//! On Linux, directory snapshots and clones are implemented with `cp -a` and
-//! optional reflinks (`--reflink=always`). Compression is applied through
+//! On Linux, live workspaces and snapshots are modeled as native Btrfs
+//! subvolumes. Compression is applied through
 //! `btrfs property set <path> compression <algo>` when configured.
 
 use std::path::{Path, PathBuf};
 use std::process::Command as StdCommand;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use gfs_domain::model::config::{GfsConfig, StorageConfig};
@@ -19,6 +20,8 @@ use tracing::instrument;
 const VALID_COMPRESSION_ALGOS: &[&str] = &["zstd", "zlib", "lzo"];
 #[cfg(not(target_os = "linux"))]
 const UNSUPPORTED_ERR: &str = "BtrfsStorage is only available on Linux";
+#[cfg(target_os = "linux")]
+const PODMAN_STORAGE_SEGMENT: &str = ".local/share/containers/storage";
 
 #[derive(Debug, Clone)]
 pub struct BtrfsStorage {
@@ -55,48 +58,21 @@ impl BtrfsStorage {
     }
 
     #[cfg(target_os = "linux")]
-    async fn copy_dir(&self, src: &str, dst: &str) -> Result<()> {
-        let dst_path = Path::new(dst);
-        if let Some(parent) = dst_path.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(StorageError::Io)?;
-        }
-
-        let mut command = Command::new("cp");
-        if self.enable_reflink {
-            command.arg("--reflink=always");
-        }
-        let output = command
-            .args(["-a", src, dst])
-            .output()
-            .await
-            .map_err(StorageError::Io)?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            return Err(StorageError::Internal(format!(
-                "copy '{}' -> '{}' failed: {}{}",
-                src,
-                dst,
-                stderr.trim(),
-                if stderr.as_ref().is_empty() {
-                    stdout.trim().to_string()
-                } else {
-                    String::new()
-                }
-            )));
-        }
-
-        Ok(())
-    }
-
-    #[cfg(target_os = "linux")]
     async fn apply_runtime_settings(&self, path: &Path) {
         if let Some(compression) = &self.compression {
             apply_compression(path, compression);
         }
+
+        if self.enable_reflink {
+            tracing::debug!("Btrfs subvolume snapshots already use native copy-on-write");
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn ensure_live_subvolume(&self, path: &Path) -> Result<()> {
+        ensure_btrfs_subvolume(path).await?;
+        self.apply_runtime_settings(path).await;
+        Ok(())
     }
 }
 
@@ -131,7 +107,7 @@ pub fn apply_storage_config(path: &Path, storage: &StorageConfig) {
 
         if storage.enable_reflink {
             tracing::info!(
-                "Reflink/CoW is enabled by default on btrfs for {}",
+                "Btrfs subvolume snapshots already use native copy-on-write for {}",
                 path.display()
             );
         }
@@ -141,6 +117,55 @@ pub fn apply_storage_config(path: &Path, storage: &StorageConfig) {
     {
         let _ = (path, storage);
     }
+}
+
+#[cfg(target_os = "linux")]
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(PathBuf::from)
+}
+
+#[cfg(target_os = "linux")]
+fn podman_storage_root() -> Option<PathBuf> {
+    home_dir().map(|home| home.join(PODMAN_STORAGE_SEGMENT))
+}
+
+#[cfg(target_os = "linux")]
+fn needs_podman_unshare(path: &Path) -> bool {
+    podman_storage_root()
+        .as_ref()
+        .is_some_and(|root| path.starts_with(root))
+}
+
+#[cfg(target_os = "linux")]
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+#[cfg(target_os = "linux")]
+fn run_podman_unshare_sync(script: &str) -> std::io::Result<std::process::Output> {
+    StdCommand::new("podman")
+        .args(["unshare", "sh", "-lc", script])
+        .output()
+}
+
+#[cfg(target_os = "linux")]
+async fn run_podman_unshare(script: &str) -> std::io::Result<std::process::Output> {
+    Command::new("podman")
+        .args(["unshare", "sh", "-lc", script])
+        .output()
+        .await
+}
+
+#[cfg(target_os = "linux")]
+fn classify_output_error(volume_id: &str, output: &std::process::Output) -> StorageError {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let message = if stderr.trim().is_empty() {
+        stdout.trim()
+    } else {
+        stderr.trim()
+    };
+    classify_stderr(volume_id, message)
 }
 
 #[cfg(target_os = "linux")]
@@ -155,7 +180,7 @@ fn apply_compression(path: &Path, algorithm: &str) {
         return;
     }
 
-    match StdCommand::new("btrfs")
+    let direct = StdCommand::new("btrfs")
         .args([
             "property",
             "set",
@@ -163,43 +188,292 @@ fn apply_compression(path: &Path, algorithm: &str) {
             "compression",
             normalized.as_str(),
         ])
-        .output()
-    {
-        Ok(output) if output.status.success() => {
-            tracing::info!("Enabled {} compression on {}", normalized, path.display());
-        }
-        Ok(output) => {
-            tracing::warn!(
-                "Failed to set compression on {}: {}",
-                path.display(),
-                String::from_utf8_lossy(&output.stderr).trim()
-            );
-        }
+        .output();
+
+    let output = match direct {
+        Ok(output) if output.status.success() => output,
+        Ok(_) if needs_podman_unshare(path) => match run_podman_unshare_sync(&format!(
+            "btrfs property set {} compression {}",
+            shell_quote(&path.to_string_lossy()),
+            shell_quote(normalized.as_str())
+        )) {
+            Ok(output) => output,
+            Err(err) => {
+                tracing::warn!("podman unshare failed while setting compression: {}", err);
+                return;
+            }
+        },
+        Ok(output) => output,
+        Err(_) if needs_podman_unshare(path) => match run_podman_unshare_sync(&format!(
+            "btrfs property set {} compression {}",
+            shell_quote(&path.to_string_lossy()),
+            shell_quote(normalized.as_str())
+        )) {
+            Ok(output) => output,
+            Err(err) => {
+                tracing::warn!("podman unshare failed while setting compression: {}", err);
+                return;
+            }
+        },
         Err(err) => {
             tracing::warn!("btrfs command not available: {}", err);
+            return;
         }
+    };
+
+    if output.status.success() {
+        tracing::info!("Enabled {} compression on {}", normalized, path.display());
+    } else {
+        tracing::warn!(
+            "Failed to set compression on {}: {}",
+            path.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
     }
 }
 
 #[cfg(target_os = "linux")]
-async fn make_read_only(path: &Path) -> Result<()> {
-    let output = Command::new("chmod")
-        .args(["-R", "a-w"])
+fn is_subvolume(path: &Path) -> bool {
+    if needs_podman_unshare(path) {
+        return run_podman_unshare_sync(&format!(
+            "btrfs subvolume show {}",
+            shell_quote(&path.to_string_lossy())
+        ))
+        .ok()
+        .is_some_and(|output| output.status.success());
+    }
+
+    StdCommand::new("btrfs")
+        .args(["subvolume", "show"])
         .arg(path)
+        .output()
+        .ok()
+        .is_some_and(|output| output.status.success())
+}
+
+#[cfg(target_os = "linux")]
+async fn run_btrfs(args: &[&str], path_for_errors: &Path) -> Result<()> {
+    if needs_podman_unshare(path_for_errors) {
+        let script = format!(
+            "btrfs {}",
+            args.iter()
+                .map(|arg| shell_quote(arg))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+        let output = run_podman_unshare(&script)
+            .await
+            .map_err(StorageError::Io)?;
+        if output.status.success() {
+            return Ok(());
+        }
+        return Err(classify_output_error(
+            &path_for_errors.to_string_lossy(),
+            &output,
+        ));
+    }
+
+    let output = Command::new("btrfs")
+        .args(args)
         .output()
         .await
         .map_err(StorageError::Io)?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    Err(classify_stderr(
+        &path_for_errors.to_string_lossy(),
+        stderr.trim(),
+    ))
+}
+
+#[cfg(target_os = "linux")]
+async fn ensure_parent_dir(path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(StorageError::Io)?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+async fn create_subvolume(path: &Path) -> Result<()> {
+    ensure_parent_dir(path).await?;
+    run_btrfs(&["subvolume", "create", &path.to_string_lossy()], path).await
+}
+
+#[cfg(target_os = "linux")]
+async fn snapshot_subvolume(source: &Path, dest: &Path, read_only: bool) -> Result<()> {
+    ensure_parent_dir(dest).await?;
+
+    if needs_podman_unshare(source) || needs_podman_unshare(dest) {
+        let mut command = String::from("btrfs subvolume snapshot");
+        if read_only {
+            command.push_str(" -r");
+        }
+        command.push(' ');
+        command.push_str(&shell_quote(&source.to_string_lossy()));
+        command.push(' ');
+        command.push_str(&shell_quote(&dest.to_string_lossy()));
+
+        let output = run_podman_unshare(&command)
+            .await
+            .map_err(StorageError::Io)?;
+        if output.status.success() {
+            return Ok(());
+        }
+        return Err(classify_output_error(&dest.to_string_lossy(), &output));
+    }
+
+    let mut args = vec!["subvolume", "snapshot"];
+    if read_only {
+        args.push("-r");
+    }
+    let source_path = source.to_string_lossy();
+    let dest_path = dest.to_string_lossy();
+    args.push(source_path.as_ref());
+    args.push(dest_path.as_ref());
+
+    run_btrfs(&args, dest).await
+}
+
+#[cfg(target_os = "linux")]
+async fn delete_subvolume(path: &Path) -> Result<()> {
+    run_btrfs(&["subvolume", "delete", &path.to_string_lossy()], path).await
+}
+
+#[cfg(target_os = "linux")]
+async fn copy_dir_contents(src: &Path, dst: &Path) -> Result<()> {
+    if needs_podman_unshare(src) || needs_podman_unshare(dst) {
+        let script = format!(
+            "cp --reflink=auto -a {}/. {}",
+            shell_quote(&src.to_string_lossy()),
+            shell_quote(&dst.to_string_lossy())
+        );
+        let output = run_podman_unshare(&script)
+            .await
+            .map_err(StorageError::Io)?;
+        if output.status.success() {
+            return Ok(());
+        }
+        return Err(classify_output_error(&src.to_string_lossy(), &output));
+    }
+
+    let source = src.join(".");
+    let output = Command::new("cp")
+        .args(["--reflink=auto", "-a"])
+        .arg(&source)
+        .arg(dst)
+        .output()
+        .await
+        .map_err(StorageError::Io)?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Err(StorageError::Internal(format!(
+        "copy '{}' -> '{}' failed: {}{}",
+        src.display(),
+        dst.display(),
+        stderr.trim(),
+        if stderr.as_ref().is_empty() {
+            stdout.trim().to_string()
+        } else {
+            String::new()
+        }
+    )))
+}
+
+#[cfg(target_os = "linux")]
+fn unique_migration_path(path: &Path, suffix: &str) -> PathBuf {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("data");
+    path.with_file_name(format!(".{name}.gfs-{suffix}-{stamp}"))
+}
+
+#[cfg(target_os = "linux")]
+async fn migrate_directory_to_subvolume(path: &Path) -> Result<()> {
+    let tmp_subvolume = unique_migration_path(path, "subvolume");
+    let backup_dir = unique_migration_path(path, "backup");
+
+    if needs_podman_unshare(path) {
+        let script = format!(
+            "btrfs subvolume create {} && cp --reflink=auto -a {}/. {} && mv {} {} && mv {} {} && rm -rf {}",
+            shell_quote(&tmp_subvolume.to_string_lossy()),
+            shell_quote(&path.to_string_lossy()),
+            shell_quote(&tmp_subvolume.to_string_lossy()),
+            shell_quote(&path.to_string_lossy()),
+            shell_quote(&backup_dir.to_string_lossy()),
+            shell_quote(&tmp_subvolume.to_string_lossy()),
+            shell_quote(&path.to_string_lossy()),
+            shell_quote(&backup_dir.to_string_lossy())
+        );
+        let output = run_podman_unshare(&script)
+            .await
+            .map_err(StorageError::Io)?;
+        if output.status.success() {
+            return Ok(());
+        }
+        return Err(classify_output_error(&path.to_string_lossy(), &output));
+    }
+
+    create_subvolume(&tmp_subvolume).await?;
+
+    let migration_result = async {
+        copy_dir_contents(path, &tmp_subvolume).await?;
+        tokio::fs::rename(path, &backup_dir)
+            .await
+            .map_err(StorageError::Io)?;
+        tokio::fs::rename(&tmp_subvolume, path)
+            .await
+            .map_err(StorageError::Io)?;
+        tokio::fs::remove_dir_all(&backup_dir)
+            .await
+            .map_err(StorageError::Io)?;
+        Ok(())
+    }
+    .await;
+
+    if migration_result.is_ok() {
+        return Ok(());
+    }
+
+    let _ = tokio::fs::rename(&backup_dir, path).await;
+    let _ = delete_subvolume(&tmp_subvolume).await;
+    migration_result
+}
+
+#[cfg(target_os = "linux")]
+async fn ensure_btrfs_subvolume(path: &Path) -> Result<()> {
+    if !path.exists() {
+        return create_subvolume(path).await;
+    }
+
+    if is_subvolume(path) {
+        return Ok(());
+    }
+
+    if !path.is_dir() {
         return Err(StorageError::Internal(format!(
-            "chmod -R a-w '{}' failed: {}",
-            path.display(),
-            stderr.trim()
+            "path is not a directory: {}",
+            path.display()
         )));
     }
 
-    Ok(())
+    migrate_directory_to_subvolume(path).await
 }
 
 #[cfg(target_os = "linux")]
@@ -335,6 +609,8 @@ impl StoragePort for BtrfsStorage {
         #[cfg(target_os = "linux")]
         {
             let source = Path::new(&id.0);
+            self.ensure_live_subvolume(source).await?;
+
             let dest = match &options.label {
                 Some(label) => PathBuf::from(label),
                 None => {
@@ -346,9 +622,8 @@ impl StoragePort for BtrfsStorage {
                 }
             };
 
-            self.copy_dir(&id.0, &dest.to_string_lossy()).await?;
+            snapshot_subvolume(source, &dest, true).await?;
             self.apply_runtime_settings(&dest).await;
-            make_read_only(&dest).await?;
 
             return Ok(Snapshot {
                 id: SnapshotId(dest.to_string_lossy().into_owned()),
@@ -378,10 +653,14 @@ impl StoragePort for BtrfsStorage {
             let src = options
                 .from_snapshot
                 .as_ref()
-                .map(|snapshot| snapshot.0.as_str())
-                .unwrap_or(&source.0);
+                .map(|snapshot| PathBuf::from(&snapshot.0))
+                .unwrap_or_else(|| PathBuf::from(&source.0));
 
-            self.copy_dir(src, &target_id.0).await?;
+            if options.from_snapshot.is_none() {
+                self.ensure_live_subvolume(&src).await?;
+            }
+
+            snapshot_subvolume(&src, Path::new(&target_id.0), false).await?;
             self.apply_runtime_settings(Path::new(&target_id.0)).await;
 
             return Ok(VolumeStatus {
@@ -449,5 +728,22 @@ mod tests {
 
         assert_eq!(storage.compression.as_deref(), Some("zstd"));
         assert!(!storage.enable_reflink);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn regular_directory_is_not_detected_as_subvolume() {
+        let regular_dir = std::env::temp_dir().join(format!(
+            "gfs-btrfs-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&regular_dir).unwrap();
+
+        assert!(!is_subvolume(&regular_dir));
+
+        let _ = std::fs::remove_dir_all(&regular_dir);
     }
 }

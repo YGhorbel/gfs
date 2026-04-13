@@ -54,16 +54,29 @@ fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
     #[cfg(target_os = "linux")]
     {
         let source = src.join(".");
-        let status = Command::new("cp")
+        let output = Command::new("cp")
             .args(["--reflink=auto", "-a"])
             .arg(&source)
             .arg(dst)
-            .status()
+            .output()
             .map_err(std::io::Error::other)?;
-        if !status.success() {
-            return Err(std::io::Error::other("cp --reflink=auto -a failed"));
+        if output.status.success() {
+            return Ok(());
         }
-        Ok(())
+
+        if is_permission_error_output(&output)
+            && run_podman_unshare(&format!(
+                "cp --reflink=auto -a {}/. {}",
+                shell_quote(&src.to_string_lossy()),
+                shell_quote(&dst.to_string_lossy())
+            ))?
+            .status
+            .success()
+        {
+            return Ok(());
+        }
+
+        Err(command_error("cp --reflink=auto -a failed", &output))
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
@@ -94,6 +107,187 @@ fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
     );
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+#[cfg(target_os = "linux")]
+fn run_podman_unshare(script: &str) -> std::io::Result<std::process::Output> {
+    Command::new("podman")
+        .args(["unshare", "sh", "-lc", script])
+        .output()
+        .map_err(std::io::Error::other)
+}
+
+#[cfg(target_os = "linux")]
+fn is_permission_error_output(output: &std::process::Output) -> bool {
+    let stderr = String::from_utf8_lossy(&output.stderr).to_ascii_lowercase();
+    stderr.contains("permission denied") || stderr.contains("operation not permitted")
+}
+
+#[cfg(target_os = "linux")]
+fn command_error(prefix: &str, output: &std::process::Output) -> std::io::Error {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let detail = if stderr.trim().is_empty() {
+        stdout.trim()
+    } else {
+        stderr.trim()
+    };
+    std::io::Error::other(format!("{prefix}: {detail}"))
+}
+
+#[cfg(target_os = "linux")]
+fn is_btrfs(path: &Path) -> bool {
+    Command::new("stat")
+        .args(["-f", "-c", "%T"])
+        .arg(path)
+        .output()
+        .ok()
+        .is_some_and(|output| {
+            output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "btrfs"
+        })
+}
+
+#[cfg(target_os = "linux")]
+fn existing_probe_path(path: &Path) -> &Path {
+    let mut current = Some(path);
+    while let Some(candidate) = current {
+        if candidate.exists() {
+            return candidate;
+        }
+        current = candidate.parent();
+    }
+    path
+}
+
+#[cfg(target_os = "linux")]
+fn is_btrfs_subvolume(path: &Path) -> bool {
+    let output = Command::new("btrfs")
+        .args(["subvolume", "show"])
+        .arg(path)
+        .output()
+        .ok();
+
+    match output {
+        Some(output) if output.status.success() => true,
+        Some(output) if is_permission_error_output(&output) => run_podman_unshare(&format!(
+            "btrfs subvolume show {}",
+            shell_quote(&path.to_string_lossy())
+        ))
+        .ok()
+        .is_some_and(|output| output.status.success()),
+        _ => false,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn run_btrfs(args: &[&str]) -> std::io::Result<()> {
+    let output = Command::new("btrfs").args(args).output()?;
+    if output.status.success() {
+        Ok(())
+    } else if is_permission_error_output(&output) {
+        let script = format!(
+            "btrfs {}",
+            args.iter()
+                .map(|arg| shell_quote(arg))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+        let unshare = run_podman_unshare(&script)?;
+        if unshare.status.success() {
+            Ok(())
+        } else {
+            Err(command_error("btrfs command failed", &unshare))
+        }
+    } else {
+        Err(command_error("btrfs command failed", &output))
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn create_btrfs_subvolume(path: &Path) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    run_btrfs(&["subvolume", "create", &path.to_string_lossy()])
+}
+
+#[cfg(target_os = "linux")]
+fn snapshot_btrfs_subvolume(src: &Path, dst: &Path, read_only: bool) -> std::io::Result<()> {
+    if let Some(parent) = dst.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let mut args = vec!["subvolume", "snapshot"];
+    if read_only {
+        args.push("-r");
+    }
+    let src_path = src.to_string_lossy();
+    let dst_path = dst.to_string_lossy();
+    args.push(src_path.as_ref());
+    args.push(dst_path.as_ref());
+    run_btrfs(&args)
+}
+
+#[cfg(target_os = "linux")]
+fn ensure_workspace_subvolume(path: &Path) -> std::io::Result<()> {
+    if is_btrfs_subvolume(path) {
+        return Ok(());
+    }
+
+    if !path.exists() {
+        return create_btrfs_subvolume(path);
+    }
+
+    if path.read_dir()?.next().is_some() {
+        return Err(std::io::Error::other(format!(
+            "cannot convert non-empty workspace directory '{}' into a btrfs subvolume",
+            path.display()
+        )));
+    }
+
+    fs::remove_dir(path)?;
+    create_btrfs_subvolume(path)
+}
+
+#[cfg(target_os = "linux")]
+fn populate_workspace_from_snapshot(
+    snapshot_dir: &Path,
+    workspace_path: &Path,
+) -> std::io::Result<()> {
+    if is_btrfs(existing_probe_path(snapshot_dir)) && is_btrfs_subvolume(snapshot_dir) {
+        return snapshot_btrfs_subvolume(snapshot_dir, workspace_path, false);
+    }
+
+    fs::create_dir_all(workspace_path)?;
+    copy_dir_all(snapshot_dir, workspace_path)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn populate_workspace_from_snapshot(
+    snapshot_dir: &Path,
+    workspace_path: &Path,
+) -> std::io::Result<()> {
+    fs::create_dir_all(workspace_path)?;
+    copy_dir_all(snapshot_dir, workspace_path)
+}
+
+#[cfg(target_os = "linux")]
+fn create_empty_workspace(path: &Path) -> std::io::Result<()> {
+    if is_btrfs(existing_probe_path(path)) {
+        return ensure_workspace_subvolume(path);
+    }
+
+    fs::create_dir_all(path)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn create_empty_workspace(path: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(path)
 }
 
 /// Best-effort permission normalization for workspace directories.
@@ -128,6 +322,16 @@ fn set_workspace_dir_permissions(path: &Path) -> std::io::Result<()> {
             };
 
             if is_permission_error {
+                let unshare = run_podman_unshare(&format!(
+                    "chmod -R 0700 {}",
+                    shell_quote(&path.to_string_lossy())
+                ));
+                if let Ok(unshare) = unshare
+                    && unshare.status.success()
+                {
+                    return Ok(());
+                }
+
                 tracing::warn!(
                     workspace_path = %path.display(),
                     error = %first_line,
@@ -161,7 +365,19 @@ impl GfsRepository {
 #[async_trait]
 impl Repository for GfsRepository {
     async fn init(&self, path: &Path, mount_point: Option<String>) -> Result<()> {
-        repo_layout::init_repo_layout(path, mount_point).map_err(map_err)
+        repo_layout::init_repo_layout(path, mount_point).map_err(map_err)?;
+
+        #[cfg(target_os = "linux")]
+        {
+            let gfs_dir = path.join(GFS_DIR);
+            if is_btrfs(&gfs_dir) {
+                let workspace_data_dir =
+                    repo_layout::get_workspace_data_dir_for_head(path).map_err(map_err)?;
+                ensure_workspace_subvolume(&workspace_data_dir).map_err(RepositoryError::Io)?;
+            }
+        }
+
+        Ok(())
     }
 
     async fn get_workspace_data_dir_for_head(&self, repo: &Path) -> Result<PathBuf> {
@@ -333,10 +549,10 @@ impl Repository for GfsRepository {
                 snapshot_dir.exists()
             );
             if snapshot_dir.exists() && snapshot_dir.is_dir() {
-                fs::create_dir_all(&workspace_path).map_err(RepositoryError::Io)?;
-                tracing::info!("Checkout: created workspace_path, copying from snapshot...");
-                copy_dir_all(&snapshot_dir, &workspace_path).map_err(RepositoryError::Io)?;
-                tracing::info!("Checkout: copy completed");
+                tracing::info!("Checkout: populating workspace from snapshot...");
+                populate_workspace_from_snapshot(&snapshot_dir, &workspace_path)
+                    .map_err(RepositoryError::Io)?;
+                tracing::info!("Checkout: workspace created");
                 // Remove stale Postgres lock files so a new instance can start on this copy.
                 let _ = fs::remove_file(workspace_path.join("postmaster.pid"));
                 let _ = fs::remove_file(workspace_path.join("postmaster.opts"));
@@ -344,7 +560,7 @@ impl Repository for GfsRepository {
                 tracing::warn!(
                     "Checkout: snapshot_dir does not exist or is not a directory, creating empty workspace"
                 );
-                fs::create_dir_all(&workspace_path).map_err(RepositoryError::Io)?;
+                create_empty_workspace(&workspace_path).map_err(RepositoryError::Io)?;
             }
         }
         set_workspace_dir_permissions(&workspace_path).map_err(RepositoryError::Io)?;
