@@ -234,21 +234,36 @@ fn apply_compression(path: &Path, algorithm: &str) {
 
 #[cfg(target_os = "linux")]
 fn is_subvolume(path: &Path) -> bool {
-    if needs_podman_unshare(path) {
-        return run_podman_unshare_sync(&format!(
+    fn has_btrfs_root_inode(path: &Path) -> bool {
+        StdCommand::new("stat")
+            .args(["-c", "%i"])
+            .arg(path)
+            .output()
+            .ok()
+            .is_some_and(|output| {
+                output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "256"
+            })
+    }
+
+    let output = if needs_podman_unshare(path) {
+        run_podman_unshare_sync(&format!(
             "btrfs subvolume show {}",
             shell_quote(&path.to_string_lossy())
         ))
         .ok()
-        .is_some_and(|output| output.status.success());
-    }
+    } else {
+        StdCommand::new("btrfs")
+            .args(["subvolume", "show"])
+            .arg(path)
+            .output()
+            .ok()
+    };
 
-    StdCommand::new("btrfs")
-        .args(["subvolume", "show"])
-        .arg(path)
-        .output()
-        .ok()
-        .is_some_and(|output| output.status.success())
+    match output {
+        Some(output) if output.status.success() => true,
+        Some(_) if is_btrfs(path) => has_btrfs_root_inode(path),
+        _ => false,
+    }
 }
 
 #[cfg(target_os = "linux")]

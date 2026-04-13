@@ -166,6 +166,17 @@ fn existing_probe_path(path: &Path) -> &Path {
 
 #[cfg(target_os = "linux")]
 fn is_btrfs_subvolume(path: &Path) -> bool {
+    fn has_btrfs_root_inode(path: &Path) -> bool {
+        Command::new("stat")
+            .args(["-c", "%i"])
+            .arg(path)
+            .output()
+            .ok()
+            .is_some_and(|output| {
+                output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "256"
+            })
+    }
+
     let output = Command::new("btrfs")
         .args(["subvolume", "show"])
         .arg(path)
@@ -179,7 +190,9 @@ fn is_btrfs_subvolume(path: &Path) -> bool {
             shell_quote(&path.to_string_lossy())
         ))
         .ok()
-        .is_some_and(|output| output.status.success()),
+        .map(|output| output.status.success())
+        .unwrap_or_else(|| is_btrfs(path) && has_btrfs_root_inode(path)),
+        Some(_) if is_btrfs(path) => has_btrfs_root_inode(path),
         _ => false,
     }
 }
