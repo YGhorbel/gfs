@@ -76,6 +76,21 @@ impl BtrfsStorage {
     }
 }
 
+fn ensure_existing_directory(path: &Path) -> Result<()> {
+    if !path.exists() {
+        return Err(StorageError::NotFound(path.to_string_lossy().into_owned()));
+    }
+
+    if !path.is_dir() {
+        return Err(StorageError::Internal(format!(
+            "path is not a directory: {}",
+            path.display()
+        )));
+    }
+
+    Ok(())
+}
+
 pub fn is_btrfs(path: &Path) -> bool {
     #[cfg(target_os = "linux")]
     {
@@ -624,6 +639,7 @@ impl StoragePort for BtrfsStorage {
         #[cfg(target_os = "linux")]
         {
             let source = Path::new(&id.0);
+            ensure_existing_directory(source)?;
             self.ensure_live_subvolume(source).await?;
 
             let dest = match &options.label {
@@ -670,6 +686,8 @@ impl StoragePort for BtrfsStorage {
                 .as_ref()
                 .map(|snapshot| PathBuf::from(&snapshot.0))
                 .unwrap_or_else(|| PathBuf::from(&source.0));
+
+            ensure_existing_directory(&src)?;
 
             if options.from_snapshot.is_none() {
                 self.ensure_live_subvolume(&src).await?;
@@ -743,6 +761,39 @@ mod tests {
 
         assert_eq!(storage.compression.as_deref(), Some("zstd"));
         assert!(!storage.enable_reflink);
+    }
+
+    #[test]
+    fn missing_source_directory_is_rejected() {
+        let missing = std::env::temp_dir().join(format!(
+            "gfs-btrfs-missing-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+
+        let err = ensure_existing_directory(&missing).unwrap_err();
+
+        assert!(matches!(err, StorageError::NotFound(path) if path == missing.to_string_lossy()));
+    }
+
+    #[test]
+    fn non_directory_source_is_rejected() {
+        let file_path = std::env::temp_dir().join(format!(
+            "gfs-btrfs-file-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&file_path, b"test").unwrap();
+
+        let err = ensure_existing_directory(&file_path).unwrap_err();
+
+        assert!(matches!(err, StorageError::Internal(message) if message.contains("path is not a directory")));
+
+        let _ = std::fs::remove_file(&file_path);
     }
 
     #[cfg(target_os = "linux")]
