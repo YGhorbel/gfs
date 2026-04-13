@@ -791,7 +791,9 @@ mod tests {
 
         let err = ensure_existing_directory(&file_path).unwrap_err();
 
-        assert!(matches!(err, StorageError::Internal(message) if message.contains("path is not a directory")));
+        assert!(
+            matches!(err, StorageError::Internal(message) if message.contains("path is not a directory"))
+        );
 
         let _ = std::fs::remove_file(&file_path);
     }
