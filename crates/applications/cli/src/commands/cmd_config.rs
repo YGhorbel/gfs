@@ -16,10 +16,20 @@ use gfs_domain::repo_utils::repo_layout;
 
 use crate::cli_utils::get_repo_dir;
 
-/// Supported config keys (git-style: user.name, user.email).
+/// Supported config keys (git-style: user.name, user.email, storage.compression, storage.reflink).
 const KEY_USER_NAME: &str = "user.name";
 const KEY_USER_EMAIL: &str = "user.email";
+const KEY_STORAGE_COMPRESSION: &str = "storage.compression";
+const KEY_STORAGE_REFLINK: &str = "storage.reflink";
 const KEY_TELEMETRY_ENABLED: &str = "telemetry.enabled";
+
+const SUPPORTED_KEYS: &[&str] = &[
+    KEY_USER_NAME,
+    KEY_USER_EMAIL,
+    KEY_STORAGE_COMPRESSION,
+    KEY_STORAGE_REFLINK,
+    KEY_TELEMETRY_ENABLED,
+];
 
 /// Run `gfs config [--global] [--path <dir>] <key> [<value>]`.
 /// - One argument (key): get; print value or nothing, exit 0.
@@ -52,17 +62,30 @@ fn get(repo_path: &std::path::Path, key: &str) -> Result<()> {
         }
     };
 
-    let out = match key {
+    let out: String = match key {
         KEY_USER_NAME => config
             .user
             .as_ref()
             .and_then(|u| u.name.as_deref())
-            .unwrap_or(""),
+            .map(|s| s.to_string())
+            .unwrap_or_default(),
         KEY_USER_EMAIL => config
             .user
             .as_ref()
             .and_then(|u| u.email.as_deref())
-            .unwrap_or(""),
+            .map(|s| s.to_string())
+            .unwrap_or_default(),
+        KEY_STORAGE_COMPRESSION => config
+            .storage
+            .as_ref()
+            .and_then(|s| s.compression.as_deref())
+            .map(|s| s.to_string())
+            .unwrap_or_default(),
+        KEY_STORAGE_REFLINK => config
+            .storage
+            .as_ref()
+            .map(|s| s.enable_reflink.to_string())
+            .unwrap_or_default(),
         KEY_TELEMETRY_ENABLED => {
             anyhow::bail!(
                 "'{}' is a global-only setting; use --global to read it",
@@ -71,11 +94,9 @@ fn get(repo_path: &std::path::Path, key: &str) -> Result<()> {
         }
         _ => {
             anyhow::bail!(
-                "unsupported config key '{}'; supported: {}, {}, {}",
+                "unsupported config key '{}'; supported: {:?}",
                 key,
-                KEY_USER_NAME,
-                KEY_USER_EMAIL,
-                KEY_TELEMETRY_ENABLED
+                SUPPORTED_KEYS
             );
         }
     };
@@ -90,13 +111,12 @@ fn set(repo_path: &std::path::Path, key: &str, value: &str) -> Result<()> {
     if key == KEY_TELEMETRY_ENABLED {
         anyhow::bail!("'{}' is a global-only setting; use --global to set it", key);
     }
-    if key != KEY_USER_NAME && key != KEY_USER_EMAIL {
+
+    if !SUPPORTED_KEYS.contains(&key) {
         anyhow::bail!(
-            "unsupported config key '{}'; supported: {}, {}, {}",
+            "unsupported config key '{}'; supported: {:?}",
             key,
-            KEY_USER_NAME,
-            KEY_USER_EMAIL,
-            KEY_TELEMETRY_ENABLED
+            SUPPORTED_KEYS
         );
     }
 
@@ -108,18 +128,79 @@ fn set(repo_path: &std::path::Path, key: &str, value: &str) -> Result<()> {
 
     let mut config = GfsConfig::load(repo_path).map_err(|e| repo_error_to_anyhow(e, repo_path))?;
 
-    let mut user = config.user.clone().unwrap_or_default();
     match key {
-        KEY_USER_NAME => user.name = Some(value.to_string()),
-        KEY_USER_EMAIL => user.email = Some(value.to_string()),
+        KEY_USER_NAME => {
+            let mut user = config.user.clone().unwrap_or_default();
+            user.name = Some(value.to_string());
+            config.user = Some(user);
+        }
+        KEY_USER_EMAIL => {
+            let mut user = config.user.clone().unwrap_or_default();
+            user.email = Some(value.to_string());
+            config.user = Some(user);
+        }
+        KEY_STORAGE_COMPRESSION => {
+            let mut storage = config.storage.clone().unwrap_or_default();
+            storage.compression = Some(value.to_string());
+            config.storage = Some(storage);
+        }
+        KEY_STORAGE_REFLINK => {
+            let mut storage = config.storage.clone().unwrap_or_default();
+            storage.enable_reflink = value == "true" || value == "1";
+            config.storage = Some(storage);
+        }
         _ => unreachable!(),
     }
-    config.user = Some(user);
     config
         .save(repo_path)
         .map_err(|e| repo_error_to_anyhow(e, repo_path))?;
 
+    if let Some(storage) = config.storage.as_ref() {
+        apply_storage_settings(key, &gfs_dir, storage);
+    }
+
     Ok(())
+}
+
+fn apply_storage_settings(
+    key: &str,
+    gfs_dir: &std::path::Path,
+    storage: &gfs_domain::model::config::StorageConfig,
+) {
+    let should_apply = match key {
+        KEY_STORAGE_COMPRESSION => storage.compression.is_some(),
+        KEY_STORAGE_REFLINK => storage.enable_reflink,
+        _ => false,
+    };
+
+    if !should_apply {
+        return;
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        if !gfs_storage_btrfs::is_btrfs(gfs_dir) {
+            eprintln!("{}", unsupported_storage_message(key));
+            return;
+        }
+
+        gfs_storage_btrfs::apply_storage_config(gfs_dir, storage);
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = gfs_dir;
+        let _ = storage;
+        eprintln!("{}", unsupported_storage_message(key));
+    }
+}
+
+fn unsupported_storage_message(key: &str) -> &'static str {
+    if key == KEY_STORAGE_COMPRESSION {
+        "Warning: compression is only supported on btrfs. Your filesystem is not btrfs."
+    } else {
+        "Warning: reflink is only supported on btrfs. Your filesystem is not btrfs."
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -155,11 +236,9 @@ fn get_global(key: &str) -> Result<()> {
         }
         _ => {
             anyhow::bail!(
-                "unsupported config key '{}'; supported: {}, {}, {}",
+                "unsupported config key '{}'; supported: {:?}",
                 key,
-                KEY_USER_NAME,
-                KEY_USER_EMAIL,
-                KEY_TELEMETRY_ENABLED
+                SUPPORTED_KEYS
             );
         }
     }
@@ -187,11 +266,9 @@ fn set_global(key: &str, value: &str) -> Result<()> {
         }
         _ => {
             anyhow::bail!(
-                "unsupported config key '{}'; supported: {}, {}, {}",
+                "unsupported config key '{}'; supported: {:?}",
                 key,
-                KEY_USER_NAME,
-                KEY_USER_EMAIL,
-                KEY_TELEMETRY_ENABLED
+                SUPPORTED_KEYS
             );
         }
     }

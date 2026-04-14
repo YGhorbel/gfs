@@ -45,6 +45,24 @@ impl fmt::Display for RuntimeConfig {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct StorageConfig {
+    #[serde(default)]
+    pub compression: Option<String>,
+    #[serde(default)]
+    pub enable_reflink: bool,
+}
+
+impl fmt::Display for StorageConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "StorageConfig(compression: {:?}, reflink: {})",
+            self.compression, self.enable_reflink
+        )
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct GfsConfig {
     pub mount_point: Option<String>,
@@ -58,6 +76,8 @@ pub struct GfsConfig {
     pub environment: Option<EnvironmentConfig>,
     #[serde(default)]
     pub runtime: Option<RuntimeConfig>,
+    #[serde(default)]
+    pub storage: Option<StorageConfig>,
 }
 
 impl GfsConfig {
@@ -165,6 +185,10 @@ mod tests {
                 runtime_version: "24".into(),
                 container_name: "c1".into(),
             }),
+            storage: Some(StorageConfig {
+                compression: Some("zstd".into()),
+                enable_reflink: true,
+            }),
         };
         config.save(dir.path()).unwrap();
 
@@ -180,6 +204,11 @@ mod tests {
             Some(5432)
         );
         assert_eq!(loaded.runtime.as_ref().unwrap().container_name, "c1");
+        assert_eq!(
+            loaded.storage.as_ref().unwrap().compression,
+            Some("zstd".into())
+        );
+        assert!(loaded.storage.as_ref().unwrap().enable_reflink);
     }
 
     #[test]
@@ -216,6 +245,7 @@ mod tests {
             user: None,
             environment: None,
             runtime: None,
+            storage: None,
         };
         // Pass path where .gfs does not exist; save writes to repo_path/.gfs/config.toml
         let result = config.save(dir.path());
