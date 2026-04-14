@@ -1,3 +1,4 @@
+use std::io::ErrorKind;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -34,6 +35,60 @@ pub enum CommitRepoError {
 
     #[error("commit message must not be empty")]
     EmptyMessage,
+}
+
+/// True when host-side snapshot copy failed because the host could not read a file
+/// (e.g. root-owned `0600` under a bind-mounted workspace). Used to fall back to
+/// [`Compute::stream_snapshot`].
+fn storage_error_looks_like_permission_denied(err: &StorageError) -> bool {
+    match err {
+        StorageError::PermissionDenied(_) => true,
+        StorageError::Io(io) => io.kind() == ErrorKind::PermissionDenied,
+        StorageError::Internal(msg) => {
+            let m = msg.as_str();
+            m.contains("Permission denied")
+                || m.contains("EACCES")
+                || (m.contains("cannot open") && m.contains("for reading"))
+        }
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod permission_denied_tests {
+    use super::storage_error_looks_like_permission_denied;
+    use crate::ports::storage::StorageError;
+    use std::io::ErrorKind;
+
+    #[test]
+    fn detects_io_permission_denied() {
+        assert!(storage_error_looks_like_permission_denied(
+            &StorageError::Io(std::io::Error::from(ErrorKind::PermissionDenied))
+        ));
+    }
+
+    #[test]
+    fn detects_cp_style_internal_message() {
+        assert!(storage_error_looks_like_permission_denied(
+            &StorageError::Internal(
+                "copy 'a' -> 'b' failed: cp: cannot open 'x' for reading: Permission denied".into(),
+            )
+        ));
+    }
+
+    #[test]
+    fn ignores_unrelated_internal_error() {
+        assert!(!storage_error_looks_like_permission_denied(
+            &StorageError::Internal("disk full".into())
+        ));
+    }
+
+    #[test]
+    fn detects_typed_permission_denied() {
+        assert!(storage_error_looks_like_permission_denied(
+            &StorageError::PermissionDenied("x".into())
+        ));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -204,37 +259,79 @@ impl<R: DatabaseProviderRegistry> CommitRepoUseCase<R> {
             .ensure_snapshot_path(&path, &snapshot_hash)
             .await?;
 
-        // When a compute container is active, stream the snapshot through the
-        // Docker daemon instead of relying on a host-side `cp`.  This bypasses
-        // host read-permission restrictions on bind-mounted files that the
-        // container process may have written as a different UID (e.g. root).
-        //
-        // Fallback: no compute → files are owned by the host user → regular
-        // host-side copy via the storage adapter is safe and uses reflinks.
-        if let (Some(runtime), Some(env)) = (&runtime_config, &environment) {
-            let instance_id = InstanceId(runtime.container_name.clone());
-            let provider =
-                self.registry
-                    .get(&env.database_provider)
-                    .ok_or_else(|| {
-                        CommitRepoError::UnknownDatabaseProvider(env.database_provider.clone())
-                    })?;
-            let container_data_path =
-                provider.definition().data_dir.to_string_lossy().into_owned();
-
-            self.compute
-                .stream_snapshot(&instance_id, &container_data_path, &snapshot_dest)
-                .await
-                .map_err(CommitRepoError::Compute)?;
-        } else {
-            self.storage
+        // Prefer fast host-side COW/reflink snapshot (`storage.snapshot`).
+        // If that fails with a permission error (unreadable bind-mounted files),
+        // fall back to streaming the data dir through the container runtime so the
+        // daemon reads files the host user cannot.
+        let snapshot_result: Result<(), CommitRepoError> = async {
+            let host_result = self
+                .storage
                 .snapshot(
                     &volume_id,
                     SnapshotOptions {
                         label: Some(snapshot_dest.to_string_lossy().into_owned()),
                     },
                 )
-                .await?;
+                .await;
+
+            match host_result {
+                Ok(_) => Ok(()),
+                Err(e) => {
+                    if !storage_error_looks_like_permission_denied(&e) {
+                        return Err(CommitRepoError::Storage(e));
+                    }
+                    let (Some(runtime), Some(env)) = (&runtime_config, &environment) else {
+                        return Err(CommitRepoError::Storage(e));
+                    };
+
+                    let instance_id = InstanceId(runtime.container_name.clone());
+                    let provider = self.registry.get(&env.database_provider).ok_or_else(|| {
+                        CommitRepoError::UnknownDatabaseProvider(env.database_provider.clone())
+                    })?;
+                    let container_data_path = provider
+                        .definition()
+                        .data_dir
+                        .to_string_lossy()
+                        .into_owned();
+
+                    if snapshot_dest.exists() {
+                        if let Err(rm_err) = tokio::fs::remove_dir_all(&snapshot_dest).await {
+                            tracing::warn!(
+                                error = %rm_err,
+                                path = %snapshot_dest.display(),
+                                "failed to remove partial snapshot before stream_snapshot fallback"
+                            );
+                        }
+                    }
+
+                    self.compute
+                        .stream_snapshot(&instance_id, &container_data_path, &snapshot_dest)
+                        .await
+                        .map_err(CommitRepoError::Compute)?;
+
+                    self.storage
+                        .finalize_snapshot(&snapshot_dest)
+                        .await
+                        .map_err(CommitRepoError::Storage)?;
+                    Ok(())
+                }
+            }
+        }
+        .await;
+
+        if let Err(e) = snapshot_result {
+            // Best-effort: remove any partially-written snapshot directory so we
+            // don't leave orphaned data in .gfs/snapshots/.
+            if snapshot_dest.exists() {
+                if let Err(rm_err) = tokio::fs::remove_dir_all(&snapshot_dest).await {
+                    tracing::warn!(
+                        error = %rm_err,
+                        path = %snapshot_dest.display(),
+                        "failed to remove partial snapshot on commit error"
+                    );
+                }
+            }
+            return Err(e);
         }
 
         // 5. Build the new commit.
@@ -338,6 +435,7 @@ mod tests {
     use super::*;
 
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
     use async_trait::async_trait;
@@ -374,6 +472,8 @@ mod tests {
         user_config: Option<UserConfig>,
         /// Records the NewCommit passed to `commit()`.
         committed: Mutex<Option<NewCommit>>,
+        /// When set, `ensure_snapshot_path` returns a path under this directory (for cleanup tests).
+        snapshot_root: Option<PathBuf>,
     }
 
     #[async_trait]
@@ -511,12 +611,12 @@ mod tests {
             _: &std::path::Path,
             hash: &str,
         ) -> crate::ports::repository::Result<PathBuf> {
-            // Return a predictable temp-dir path for testing.
-            Ok(PathBuf::from(format!(
-                "/tmp/snapshots/{}/{}",
-                &hash[..2],
-                &hash[2..]
-            )))
+            let dest = if let Some(ref root) = self.snapshot_root {
+                root.join(&hash[..2]).join(&hash[2..])
+            } else {
+                PathBuf::from(format!("/tmp/snapshots/{}/{}", &hash[..2], &hash[2..]))
+            };
+            Ok(dest)
         }
         async fn get_active_workspace_data_dir(
             &self,
@@ -535,6 +635,9 @@ mod tests {
         prepared: Mutex<bool>,
         paused: Mutex<bool>,
         unpaused: Mutex<bool>,
+        /// When set, `stream_snapshot` creates `dest` then fails with this message.
+        stream_snapshot_fail_message: Mutex<Option<String>>,
+        stream_snapshot_calls: AtomicUsize,
     }
 
     impl Default for MockCompute {
@@ -544,6 +647,8 @@ mod tests {
                 prepared: Mutex::new(false),
                 paused: Mutex::new(false),
                 unpaused: Mutex::new(false),
+                stream_snapshot_fail_message: Mutex::new(None),
+                stream_snapshot_calls: AtomicUsize::new(0),
             }
         }
     }
@@ -658,7 +763,11 @@ mod tests {
             _container_path: &str,
             dest: &std::path::Path,
         ) -> crate::ports::compute::Result<()> {
+            self.stream_snapshot_calls.fetch_add(1, Ordering::SeqCst);
             std::fs::create_dir_all(dest).map_err(crate::ports::compute::ComputeError::Io)?;
+            if let Some(msg) = self.stream_snapshot_fail_message.lock().unwrap().clone() {
+                return Err(crate::ports::compute::ComputeError::Internal(msg));
+            }
             Ok(())
         }
         async fn get_task_connection_info(
@@ -695,6 +804,10 @@ mod tests {
         last_volume: Mutex<Option<String>>,
         /// Records the label (destination path) passed to snapshot().
         last_label: Mutex<Option<String>>,
+        /// Records the path passed to finalize_snapshot().
+        finalized: Mutex<Option<std::path::PathBuf>>,
+        /// When set, `snapshot()` returns this error (e.g. permission denied).
+        snapshot_fail: Mutex<Option<crate::ports::storage::StorageError>>,
     }
 
     impl MockStorage {
@@ -703,6 +816,8 @@ mod tests {
                 snapshot_id: snapshot_id.into(),
                 last_volume: Mutex::new(None),
                 last_label: Mutex::new(None),
+                finalized: Mutex::new(None),
+                snapshot_fail: Mutex::new(None),
             }
         }
     }
@@ -726,6 +841,9 @@ mod tests {
         ) -> crate::ports::storage::Result<Snapshot> {
             *self.last_volume.lock().unwrap() = Some(id.0.clone());
             *self.last_label.lock().unwrap() = options.label.clone();
+            if let Some(err) = self.snapshot_fail.lock().unwrap().take() {
+                return Err(err);
+            }
             Ok(Snapshot {
                 id: SnapshotId(self.snapshot_id.clone()),
                 volume_id: id.clone(),
@@ -764,6 +882,13 @@ mod tests {
                 used_bytes: 0,
                 free_bytes: 0,
             })
+        }
+        async fn finalize_snapshot(
+            &self,
+            dest: &std::path::Path,
+        ) -> crate::ports::storage::Result<()> {
+            *self.finalized.lock().unwrap() = Some(dest.to_path_buf());
+            Ok(())
         }
     }
 
@@ -970,13 +1095,136 @@ mod tests {
             *compute.unpaused.lock().unwrap(),
             "unpause should have been called"
         );
-        // When compute is active, snapshot goes through stream_snapshot (not storage.snapshot).
-        // Verify storage was NOT called (compute path bypasses it).
+        // Host snapshot succeeds: storage.snapshot is used; no stream fallback.
         assert_eq!(
             storage.last_volume.lock().unwrap().as_deref(),
-            None,
-            "storage.snapshot should not be called when compute is active"
+            Some("/vol/main"),
+            "storage.snapshot should copy the workspace volume"
         );
+        assert_eq!(
+            compute.stream_snapshot_calls.load(Ordering::SeqCst),
+            0,
+            "stream_snapshot should not run when host snapshot succeeds"
+        );
+        assert!(
+            storage.finalized.lock().unwrap().is_none(),
+            "finalize_snapshot is only for stream_snapshot fallback"
+        );
+    }
+
+    #[tokio::test]
+    async fn commit_stream_snapshot_finalizes_read_only() {
+        // Host snapshot fails with permission denied → fallback runs stream_snapshot
+        // then finalize_snapshot.
+        let compute = Arc::new(MockCompute {
+            state: InstanceState::Stopped,
+            ..Default::default()
+        });
+        let repo = MockRepository {
+            commit_hash: "fin123".into(),
+            current_commit: "0".into(),
+            mount_point: Some("/vol/data".into()),
+            runtime_config: Some(RuntimeConfig {
+                runtime_provider: "docker".into(),
+                runtime_version: "24".into(),
+                container_name: "fin-pg".into(),
+            }),
+            environment: Some(EnvironmentConfig {
+                database_provider: "mock-db".into(),
+                database_version: "16".into(),
+                database_port: None,
+            }),
+            ..Default::default()
+        };
+        let storage = Arc::new(MockStorage::new("snap-fin"));
+        *storage.snapshot_fail.lock().unwrap() =
+            Some(crate::ports::storage::StorageError::Internal(
+                "copy 'src' -> 'dst' failed: cp: cannot open 'x' for reading: Permission denied"
+                    .into(),
+            ));
+        let registry = Arc::new(MockRegistry);
+
+        let uc = CommitRepoUseCase::new(Arc::new(repo), compute.clone(), storage.clone(), registry);
+
+        uc.run(
+            existing_repo_path(),
+            "finalize test".into(),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("commit should succeed");
+
+        assert_eq!(compute.stream_snapshot_calls.load(Ordering::SeqCst), 1);
+        let finalized = storage.finalized.lock().unwrap().clone();
+        assert!(
+            finalized.is_some(),
+            "finalize_snapshot must be called after fallback"
+        );
+        let finalized_str = finalized.unwrap().to_string_lossy().into_owned();
+        assert!(
+            finalized_str.contains("snapshots"),
+            "finalized path should be under the snapshots dir, got: {finalized_str}"
+        );
+    }
+
+    #[tokio::test]
+    async fn commit_removes_partial_snapshot_when_stream_fails() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let compute = Arc::new(MockCompute {
+            stream_snapshot_fail_message: Mutex::new(Some("stream failed".into())),
+            ..Default::default()
+        });
+        let repo = MockRepository {
+            commit_hash: "unused".into(),
+            current_commit: "0".into(),
+            mount_point: Some("/vol/data".into()),
+            snapshot_root: Some(tmp.path().to_path_buf()),
+            runtime_config: Some(RuntimeConfig {
+                runtime_provider: "docker".into(),
+                runtime_version: "24".into(),
+                container_name: "fail-pg".into(),
+            }),
+            environment: Some(EnvironmentConfig {
+                database_provider: "mock-db".into(),
+                database_version: "16".into(),
+                database_port: None,
+            }),
+            ..Default::default()
+        };
+        let storage = Arc::new(MockStorage::new("snap"));
+        *storage.snapshot_fail.lock().unwrap() = Some(
+            crate::ports::storage::StorageError::Internal("copy failed: Permission denied".into()),
+        );
+        let uc = CommitRepoUseCase::new(Arc::new(repo), compute, storage, Arc::new(MockRegistry));
+
+        let err = uc
+            .run(
+                existing_repo_path(),
+                "cleanup test".into(),
+                None,
+                None,
+                None,
+                None,
+            )
+            .await;
+        assert!(matches!(err, Err(CommitRepoError::Compute(_))));
+
+        // `remove_dir_all(snapshot_dest)` removes the leaf hash dir; the two-char
+        // prefix (e.g. `.gfs/snapshots/ab/`) may remain empty — same as production.
+        for entry in std::fs::read_dir(tmp.path()).expect("read_dir") {
+            let outer = entry.expect("entry").path();
+            if outer.is_dir() {
+                let n = std::fs::read_dir(&outer).expect("read_dir inner").count();
+                assert_eq!(
+                    n, 0,
+                    "snapshot under {:?} should be gone after cleanup",
+                    outer
+                );
+            }
+        }
     }
 
     #[tokio::test]
@@ -1158,6 +1406,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn commit_non_permission_storage_error_skips_stream_fallback() {
+        let compute = Arc::new(MockCompute::default());
+        let repo = MockRepository {
+            commit_hash: "x".into(),
+            current_commit: "0".into(),
+            mount_point: Some("/vol/data".into()),
+            runtime_config: Some(RuntimeConfig {
+                runtime_provider: "docker".into(),
+                runtime_version: "24".into(),
+                container_name: "pg".into(),
+            }),
+            environment: Some(EnvironmentConfig {
+                database_provider: "mock-db".into(),
+                database_version: "16".into(),
+                database_port: None,
+            }),
+            ..Default::default()
+        };
+        let storage = Arc::new(MockStorage::new("snap"));
+        *storage.snapshot_fail.lock().unwrap() = Some(
+            crate::ports::storage::StorageError::Internal("storage failed".into()),
+        );
+        let uc = CommitRepoUseCase::new(
+            Arc::new(repo),
+            compute.clone(),
+            storage,
+            Arc::new(MockRegistry),
+        );
+        let result = uc
+            .run(existing_repo_path(), "fail".into(), None, None, None, None)
+            .await;
+        assert!(matches!(result, Err(CommitRepoError::Storage(_))));
+        assert_eq!(compute.stream_snapshot_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
     async fn commit_storage_error() {
         struct FailingStorage;
 
@@ -1212,6 +1496,12 @@ mod tests {
                     used_bytes: 0,
                     free_bytes: 0,
                 })
+            }
+            async fn finalize_snapshot(
+                &self,
+                _: &std::path::Path,
+            ) -> crate::ports::storage::Result<()> {
+                Ok(())
             }
         }
 

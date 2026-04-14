@@ -408,7 +408,7 @@ async fn copy_dir_contents(src: &Path, dst: &Path) -> Result<()> {
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     let stdout = String::from_utf8_lossy(&output.stdout);
-    Err(StorageError::Internal(format!(
+    let msg = format!(
         "copy '{}' -> '{}' failed: {}{}",
         src.display(),
         dst.display(),
@@ -418,7 +418,12 @@ async fn copy_dir_contents(src: &Path, dst: &Path) -> Result<()> {
         } else {
             String::new()
         }
-    )))
+    );
+    let lower = stderr.to_ascii_lowercase();
+    if lower.contains("permission denied") || lower.contains("operation not permitted") {
+        return Err(StorageError::PermissionDenied(msg));
+    }
+    Err(StorageError::Internal(msg))
 }
 
 #[cfg(target_os = "linux")]
@@ -736,6 +741,33 @@ impl StoragePort for BtrfsStorage {
         #[cfg(not(target_os = "linux"))]
         {
             let _ = id;
+            Err(unsupported())
+        }
+    }
+
+    async fn finalize_snapshot(&self, dest: &Path) -> Result<()> {
+        #[cfg(target_os = "linux")]
+        {
+            let output = Command::new("chmod")
+                .args(["-R", "a-w"])
+                .arg(dest)
+                .output()
+                .await
+                .map_err(StorageError::Io)?;
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                return Err(StorageError::Internal(format!(
+                    "chmod -R a-w '{}' failed: {}",
+                    dest.display(),
+                    stderr.trim()
+                )));
+            }
+            return Ok(());
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = dest;
             Err(unsupported())
         }
     }

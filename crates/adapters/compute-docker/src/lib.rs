@@ -14,8 +14,9 @@
 pub mod containers;
 mod error;
 
+use std::io::ErrorKind;
 use std::io::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use futures_util::{StreamExt, TryStreamExt};
@@ -27,6 +28,21 @@ use gfs_domain::ports::compute::{
 use tracing::instrument;
 
 use crate::error::classify;
+
+/// Reject tar paths that could escape `dest` (`..`, absolute components, etc.).
+fn tar_stripped_path_is_safe(stripped: &Path) -> bool {
+    if stripped.as_os_str().is_empty() {
+        return false;
+    }
+    for c in stripped.components() {
+        match c {
+            std::path::Component::Normal(_) | std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => return false,
+            std::path::Component::RootDir | std::path::Component::Prefix(_) => return false,
+        }
+    }
+    true
+}
 
 /// Host path string suitable for Docker bind mounts. Verbatim Windows paths
 /// (`\\?\...`) break Docker’s `host:container` parsing; map them to normal paths.
@@ -902,17 +918,27 @@ impl Compute for DockerCompute {
         // Spawn the blocking unpack side first so the reader is already
         // consuming when the writer starts filling the pipe.
         let unpack = tokio::task::spawn_blocking(move || -> std::io::Result<usize> {
+            use std::io;
+
             let mut archive = tar::Archive::new(pipe_reader);
             archive.set_preserve_permissions(false);
             let mut files = 0usize;
             for entry in archive.entries()? {
                 let mut entry = entry?;
+                if entry.header().entry_type().is_symlink() {
+                    continue;
+                }
                 let raw_path = entry.path()?.into_owned();
                 // Strip the leading directory component Docker always adds.
-                let stripped: std::path::PathBuf =
-                    raw_path.components().skip(1).collect();
+                let stripped: PathBuf = raw_path.components().skip(1).collect();
                 if stripped.as_os_str().is_empty() {
                     continue;
+                }
+                if !tar_stripped_path_is_safe(&stripped) {
+                    return Err(io::Error::new(
+                        ErrorKind::InvalidData,
+                        format!("refusing unsafe tar path: {}", stripped.display()),
+                    ));
                 }
                 let dest_path = dest.join(&stripped);
                 if entry.header().entry_type().is_dir() {
@@ -971,6 +997,7 @@ impl DockerCompute {
             cmd: Some(vec!["sh".into(), "-c".into(), cmd.to_string()]),
             attach_stdout: Some(true),
             attach_stderr: Some(true),
+            user: Some("0:0".into()),
             ..Default::default()
         };
         let exec = self

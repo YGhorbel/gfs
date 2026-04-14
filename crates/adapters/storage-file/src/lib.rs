@@ -50,6 +50,14 @@ use tracing::instrument;
 
 use crate::error::classify_stderr;
 
+fn map_copy_error(stderr: &str, msg: String) -> StorageError {
+    let lower = stderr.to_ascii_lowercase();
+    if lower.contains("permission denied") || lower.contains("operation not permitted") {
+        return StorageError::PermissionDenied(msg);
+    }
+    StorageError::Internal(msg)
+}
+
 // ---------------------------------------------------------------------------
 // FileStorage (public struct, cross-platform)
 // ---------------------------------------------------------------------------
@@ -218,7 +226,7 @@ async fn copy_dir(src: &str, dst: &str) -> Result<()> {
     if !success {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
-        return Err(StorageError::Internal(format!(
+        let msg = format!(
             "copy '{}' -> '{}' failed: {}{}",
             src,
             dst,
@@ -228,7 +236,8 @@ async fn copy_dir(src: &str, dst: &str) -> Result<()> {
             } else {
                 String::new()
             }
-        )));
+        );
+        return Err(map_copy_error(&stderr, msg));
     }
     Ok(())
 }
@@ -469,6 +478,10 @@ impl StoragePort for FileStorage {
                 free_bytes: 0,
             })
         }
+    }
+
+    async fn finalize_snapshot(&self, dest: &Path) -> Result<()> {
+        make_read_only(dest).await
     }
 }
 
