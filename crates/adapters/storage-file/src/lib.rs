@@ -117,7 +117,7 @@ async fn make_read_only(path: &Path) -> Result<()> {
         .map_err(StorageError::Io)?;
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
-        return Err(StorageError::Internal(format!(
+        return Err(map_copy_error(&stderr, format!(
             "chmod -R u+rX,u-w,go-rwx '{}' failed: {}",
             path.display(),
             stderr.trim()

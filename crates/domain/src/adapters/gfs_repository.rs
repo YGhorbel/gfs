@@ -559,6 +559,10 @@ impl Repository for GfsRepository {
                 // Remove stale Postgres lock files so a new instance can start on this copy.
                 let _ = fs::remove_file(workspace_path.join("postmaster.pid"));
                 let _ = fs::remove_file(workspace_path.join("postmaster.opts"));
+                // Signal that a pre-start ownership repair is required for this workspace.
+                if let Some(parent) = workspace_path.parent() {
+                    let _ = fs::write(parent.join(".needs-repair"), b"");
+                }
             } else {
                 tracing::warn!(
                     "Checkout: snapshot_dir does not exist or is not a directory, creating empty workspace"
