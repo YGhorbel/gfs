@@ -50,7 +50,25 @@ pub(crate) fn classify(container_id: &str, err: bollard::errors::Error) -> Compu
                         ComputeError::Internal(message.clone())
                     }
                 }
-                _ => ComputeError::Internal(message.clone()),
+                _ => {
+                    // Rootless Podman / cgroup v1 hosts cannot freeze container
+                    // processes.  The daemon surfaces this as a 500 with a message
+                    // containing one of these phrases.
+                    let pause_phrases = [
+                        "cgroup",
+                        "freezing",
+                        "freeze",
+                        "pause is not",
+                        "cannot pause",
+                        "not supported",
+                        "rootless",
+                    ];
+                    if pause_phrases.iter().any(|p| msg.contains(p)) {
+                        ComputeError::PauseUnsupported(message.clone())
+                    } else {
+                        ComputeError::Internal(message.clone())
+                    }
+                }
             }
         }
         bollard::errors::Error::IOError { err } => ComputeError::Internal(err.to_string()),

@@ -1148,6 +1148,16 @@ impl Compute for DockerCompute {
             .map_err(ComputeError::Io)?;
 
         // Surface any stream error after the unpack has drained.
+        // Also guard against an empty archive — zero files means Docker returned
+        // an empty (or header-only) tar, which would commit an empty snapshot and
+        // cause the database to reinitialize on the next checkout (data loss).
+        if files == 0 {
+            return Err(ComputeError::Internal(format!(
+                "stream_snapshot: container '{container_path}' produced an empty archive \
+                 (0 regular files extracted); refusing to commit empty snapshot",
+                container_path = container_path,
+            )));
+        }
         //
         // When `tar::Archive` reaches the end-of-archive markers it may stop reading
         // even if the Docker stream still has trailing padding bytes. That closes the

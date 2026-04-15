@@ -28,6 +28,12 @@ pub enum ComputeError {
     #[error("instance is not paused: '{0}'")]
     NotPaused(String),
 
+    /// The runtime does not support cgroup freezing (e.g. rootless Podman on
+    /// cgroup v1).  The snapshot will be crash-consistent rather than
+    /// freeze-consistent, which is safe for PostgreSQL after a CHECKPOINT.
+    #[error("pause not supported by runtime: {0}")]
+    PauseUnsupported(String),
+
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 

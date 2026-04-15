@@ -263,15 +263,31 @@ impl<R: DatabaseProviderRegistry> CommitRepoUseCase<R> {
                 .await?;
 
             // Pause the container so no writes land during the snapshot.
+            // On rootless Podman with cgroup v1 the runtime cannot freeze
+            // container processes; treat that as a soft failure and proceed
+            // with a crash-consistent snapshot (CHECKPOINT already applied).
             let status = self.compute.status(&instance_id).await?;
             if status.state == InstanceState::Running {
-                self.compute.pause(&instance_id).await?;
-                // RAII guard: ensures unpause even on task cancellation or panic.
-                unpause_guard = Some(UnpauseGuard::new(
-                    Arc::clone(&self.compute),
-                    instance_id.clone(),
-                ));
-                paused_instance_id = Some(instance_id);
+                match self.compute.pause(&instance_id).await {
+                    Ok(_) => {
+                        // RAII guard: ensures unpause even on task cancellation or panic.
+                        unpause_guard = Some(UnpauseGuard::new(
+                            Arc::clone(&self.compute),
+                            instance_id.clone(),
+                        ));
+                        paused_instance_id = Some(instance_id);
+                    }
+                    Err(ComputeError::PauseUnsupported(ref e)) => {
+                        tracing::warn!(
+                            error = %e,
+                            instance = %instance_id,
+                            "container pause not available (cgroup v1 or rootless runtime); \
+                             snapshot will be crash-consistent — CHECKPOINT already applied"
+                        );
+                        // No unpause guard: nothing was paused.
+                    }
+                    Err(e) => return Err(CommitRepoError::Compute(e)),
+                }
             }
         }
 
@@ -731,6 +747,9 @@ mod tests {
         /// When set, `stream_snapshot` creates `dest` then fails with this message.
         stream_snapshot_fail_message: Mutex<Option<String>>,
         stream_snapshot_calls: AtomicUsize,
+        /// When set, `pause()` returns `ComputeError::Internal` with this message
+        /// instead of succeeding (simulates cgroup v1 / rootless Podman).
+        pause_fails_with: Option<String>,
     }
 
     impl Default for MockCompute {
@@ -742,6 +761,7 @@ mod tests {
                 unpaused: Mutex::new(false),
                 stream_snapshot_fail_message: Mutex::new(None),
                 stream_snapshot_calls: AtomicUsize::new(0),
+                pause_fails_with: None,
             }
         }
     }
@@ -810,6 +830,9 @@ mod tests {
             Ok(vec![])
         }
         async fn pause(&self, id: &InstanceId) -> crate::ports::compute::Result<InstanceStatus> {
+            if let Some(ref msg) = self.pause_fails_with {
+                return Err(ComputeError::Internal(msg.clone()));
+            }
             *self.paused.lock().unwrap() = true;
             Ok(InstanceStatus {
                 id: id.clone(),
@@ -1607,5 +1630,107 @@ mod tests {
             )
             .await;
         assert!(matches!(result, Err(CommitRepoError::Storage(_))));
+    }
+
+    /// Rootless Podman on cgroup v1 returns an Internal error from `pause()` whose
+    /// message contains "cgroup".  The commit must succeed (not return an error) by
+    /// proceeding with a crash-consistent snapshot, and must NOT call `unpause()`
+    /// because the container was never actually paused.
+    #[tokio::test]
+    async fn commit_succeeds_when_pause_unsupported_cgroup_v1() {
+        let compute = Arc::new(MockCompute {
+            state: InstanceState::Running,
+            pause_fails_with: Some(
+                "OCI runtime error: cgroups: cgroup v1 does not support freezing a single process"
+                    .into(),
+            ),
+            ..Default::default()
+        });
+        let repo = MockRepository {
+            commit_hash: "abc123".into(),
+            current_commit: "prev".into(),
+            mount_point: Some("/vol/main".into()),
+            runtime_config: Some(RuntimeConfig {
+                runtime_provider: "podman".into(),
+                runtime_version: "5.0".into(),
+                container_name: "gfs-pg-test".into(),
+            }),
+            environment: Some(EnvironmentConfig {
+                database_provider: "mock-db".into(),
+                database_version: "16".into(),
+                database_port: None,
+            }),
+            ..Default::default()
+        };
+        let storage = Arc::new(MockStorage::new("snap-abc"));
+        let registry = Arc::new(MockRegistry);
+
+        let uc = CommitRepoUseCase::new(Arc::new(repo), compute.clone(), storage, registry);
+        let result = uc
+            .run(
+                existing_repo_path(),
+                "cgroup v1 pause test".into(),
+                None,
+                None,
+                None,
+                None,
+            )
+            .await;
+
+        assert!(result.is_ok(), "commit should succeed despite pause failure: {result:?}");
+        assert!(
+            !*compute.paused.lock().unwrap(),
+            "paused flag should be false — pause was rejected by runtime"
+        );
+        assert!(
+            !*compute.unpaused.lock().unwrap(),
+            "unpause must not be called when pause was never issued"
+        );
+    }
+
+    /// A genuine pause failure (container not found, daemon error) must still
+    /// propagate as an error — only the "unsupported" subset is swallowed.
+    #[tokio::test]
+    async fn commit_fails_on_genuine_pause_error() {
+        let compute = Arc::new(MockCompute {
+            state: InstanceState::Running,
+            pause_fails_with: Some("daemon internal error: connection refused".into()),
+            ..Default::default()
+        });
+        let repo = MockRepository {
+            commit_hash: "abc123".into(),
+            current_commit: "prev".into(),
+            mount_point: Some("/vol/main".into()),
+            runtime_config: Some(RuntimeConfig {
+                runtime_provider: "docker".into(),
+                runtime_version: "24".into(),
+                container_name: "gfs-pg-test".into(),
+            }),
+            environment: Some(EnvironmentConfig {
+                database_provider: "mock-db".into(),
+                database_version: "16".into(),
+                database_port: None,
+            }),
+            ..Default::default()
+        };
+        let storage = Arc::new(MockStorage::new("snap-abc"));
+        let registry = Arc::new(MockRegistry);
+
+        let uc = CommitRepoUseCase::new(Arc::new(repo), compute, storage, registry);
+        let result = uc
+            .run(
+                existing_repo_path(),
+                "genuine pause error".into(),
+                None,
+                None,
+                None,
+                None,
+            )
+            .await;
+
+        assert!(
+            matches!(result, Err(CommitRepoError::Compute(_))),
+            "genuine pause error must propagate: {result:?}"
+        );
     }
 }
