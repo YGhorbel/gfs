@@ -831,7 +831,17 @@ mod tests {
         }
         async fn pause(&self, id: &InstanceId) -> crate::ports::compute::Result<InstanceStatus> {
             if let Some(ref msg) = self.pause_fails_with {
-                return Err(ComputeError::Internal(msg.clone()));
+                // Mirror the real `classify()` in compute-docker: cgroup/freeze phrases
+                // map to PauseUnsupported; everything else is a genuine Internal error.
+                let lower = msg.to_ascii_lowercase();
+                let is_pause_unsupported = ["cgroup", "freezing", "freeze", "pause is not",
+                    "cannot pause", "not supported", "rootless"]
+                    .iter().any(|p| lower.contains(p));
+                return Err(if is_pause_unsupported {
+                    ComputeError::PauseUnsupported(msg.clone())
+                } else {
+                    ComputeError::Internal(msg.clone())
+                });
             }
             *self.paused.lock().unwrap() = true;
             Ok(InstanceStatus {
@@ -1632,10 +1642,10 @@ mod tests {
         assert!(matches!(result, Err(CommitRepoError::Storage(_))));
     }
 
-    /// Rootless Podman on cgroup v1 returns an Internal error from `pause()` whose
-    /// message contains "cgroup".  The commit must succeed (not return an error) by
-    /// proceeding with a crash-consistent snapshot, and must NOT call `unpause()`
-    /// because the container was never actually paused.
+    /// Rootless Podman on cgroup v1 returns a `PauseUnsupported` error from `pause()`.
+    /// The commit must succeed (not return an error) by proceeding with a
+    /// crash-consistent snapshot, and must NOT call `unpause()` because the
+    /// container was never actually paused.
     #[tokio::test]
     async fn commit_succeeds_when_pause_unsupported_cgroup_v1() {
         let compute = Arc::new(MockCompute {
