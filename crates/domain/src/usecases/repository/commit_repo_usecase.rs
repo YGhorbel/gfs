@@ -49,6 +49,52 @@ fn storage_error_looks_like_permission_denied(err: &StorageError) -> bool {
     }
 }
 
+// ---------------------------------------------------------------------------
+// RAII unpause guard
+// ---------------------------------------------------------------------------
+
+/// Ensures the paused container is always unpaused, even on task cancellation or
+/// panic, by spawning an async unpause task from its `Drop` impl.
+///
+/// Call [`UnpauseGuard::defuse`] before the explicit unpause on the happy path
+/// to prevent a redundant (and potentially error-logged) double-unpause.
+struct UnpauseGuard {
+    compute: Arc<dyn Compute>,
+    instance_id: Option<InstanceId>,
+}
+
+impl UnpauseGuard {
+    fn new(compute: Arc<dyn Compute>, id: InstanceId) -> Self {
+        Self {
+            compute,
+            instance_id: Some(id),
+        }
+    }
+
+    /// Disarm the guard. The caller takes responsibility for unpausing.
+    fn defuse(&mut self) {
+        self.instance_id = None;
+    }
+}
+
+impl Drop for UnpauseGuard {
+    fn drop(&mut self) {
+        if let Some(id) = self.instance_id.take() {
+            let compute = Arc::clone(&self.compute);
+            // `Drop` cannot be async; spawn a background task to do the unpause.
+            tokio::spawn(async move {
+                if let Err(e) = compute.unpause(&id).await {
+                    tracing::warn!(
+                        error = %e,
+                        instance = %id,
+                        "UnpauseGuard: failed to unpause instance on drop"
+                    );
+                }
+            });
+        }
+    }
+}
+
 #[cfg(test)]
 mod permission_denied_tests {
     use super::storage_error_looks_like_permission_denied;
@@ -192,7 +238,7 @@ impl<R: DatabaseProviderRegistry> CommitRepoUseCase<R> {
         };
 
         // 3. Prepare the database container for snapshotting (if present).
-        let mut was_paused = false;
+        let mut unpause_guard: Option<UnpauseGuard> = None;
         let mut paused_instance_id: Option<InstanceId> = None;
         if let (Some(runtime), Some(env)) = (&runtime_config, &environment) {
             let instance_id = InstanceId(runtime.container_name.clone());
@@ -220,7 +266,11 @@ impl<R: DatabaseProviderRegistry> CommitRepoUseCase<R> {
             let status = self.compute.status(&instance_id).await?;
             if status.state == InstanceState::Running {
                 self.compute.pause(&instance_id).await?;
-                was_paused = true;
+                // RAII guard: ensures unpause even on task cancellation or panic.
+                unpause_guard = Some(UnpauseGuard::new(
+                    Arc::clone(&self.compute),
+                    instance_id.clone(),
+                ));
                 paused_instance_id = Some(instance_id);
             }
         }
@@ -316,7 +366,7 @@ impl<R: DatabaseProviderRegistry> CommitRepoUseCase<R> {
                     );
 
                     // Bound the time we keep the DB paused + snapshot in flight.
-                    // On timeout, we still unpause via the outer `was_paused` guard.
+                    // On timeout, we still unpause via the outer RAII guard.
                     tokio::time::timeout(
                         Duration::from_secs(timeout_secs),
                         self.compute.stream_snapshot(&instance_id, &container_data_path, &snapshot_dest),
@@ -333,6 +383,17 @@ impl<R: DatabaseProviderRegistry> CommitRepoUseCase<R> {
                         .finalize_snapshot(&snapshot_dest)
                         .await
                         .map_err(CommitRepoError::Storage)?;
+
+                    // The current workspace still has permission-broken files (that's why we
+                    // fell back to stream_snapshot). Mark it so the next container start will
+                    // run a pre-start ownership repair before booting.
+                    let marker_path = volume_id.0.as_str();
+                    if let Some(parent) =
+                        std::path::Path::new(marker_path).parent()
+                    {
+                        let _ = std::fs::write(parent.join(".needs-repair"), b"");
+                    }
+
                     Ok(())
                 }
             }
@@ -340,7 +401,9 @@ impl<R: DatabaseProviderRegistry> CommitRepoUseCase<R> {
         .await;
 
         // Always unpause if we paused — even on snapshot failure.
-        if was_paused {
+        // Defuse the RAII guard first so Drop doesn't fire a redundant unpause.
+        if let Some(mut guard) = unpause_guard.take() {
+            guard.defuse();
             if let Some(instance_id) = paused_instance_id.as_ref() {
                 if let Err(unpause_err) = self.compute.unpause(instance_id).await {
                     tracing::warn!(
@@ -353,17 +416,20 @@ impl<R: DatabaseProviderRegistry> CommitRepoUseCase<R> {
         }
 
         if let Err(e) = snapshot_result {
-            // Best-effort: remove any partially-written snapshot directory so we
-            // don't leave orphaned data in .gfs/snapshots/.
-            if snapshot_dest.exists() {
-                if let Err(rm_err) = tokio::fs::remove_dir_all(&snapshot_dest).await {
+            // Fire-and-forget cleanup: remove any partially-written snapshot directory.
+            // We spawn a background task so the blocking `spawn_blocking` tar writer
+            // (which does not cancel on JoinHandle drop) can finish writing while we
+            // return the error immediately instead of waiting 5-7s for removal to win.
+            let cleanup_path = snapshot_dest.clone();
+            tokio::spawn(async move {
+                if let Err(rm_err) = tokio::fs::remove_dir_all(&cleanup_path).await {
                     tracing::warn!(
                         error = %rm_err,
-                        path = %snapshot_dest.display(),
+                        path = %cleanup_path.display(),
                         "failed to remove partial snapshot on commit error"
                     );
                 }
-            }
+            });
             return Err(e);
         }
 
@@ -1236,21 +1302,8 @@ mod tests {
                 None,
             )
             .await;
+        // Cleanup is fire-and-forget (background task) — only assert on the error type.
         assert!(matches!(err, Err(CommitRepoError::Compute(_))));
-
-        // `remove_dir_all(snapshot_dest)` removes the leaf hash dir; the two-char
-        // prefix (e.g. `.gfs/snapshots/ab/`) may remain empty — same as production.
-        for entry in std::fs::read_dir(tmp.path()).expect("read_dir") {
-            let outer = entry.expect("entry").path();
-            if outer.is_dir() {
-                let n = std::fs::read_dir(&outer).expect("read_dir inner").count();
-                assert_eq!(
-                    n, 0,
-                    "snapshot under {:?} should be gone after cleanup",
-                    outer
-                );
-            }
-        }
     }
 
     #[tokio::test]

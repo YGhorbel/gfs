@@ -44,6 +44,18 @@ fn tar_stripped_path_is_safe(stripped: &Path) -> bool {
     true
 }
 
+/// Validate a symlink target: must be non-empty, relative, and contain no `..` or root components.
+fn tar_link_target_is_safe(target: &Path) -> bool {
+    !target.as_os_str().is_empty()
+        && !target.is_absolute()
+        && target.components().all(|c| {
+            matches!(
+                c,
+                std::path::Component::Normal(_) | std::path::Component::CurDir
+            )
+        })
+}
+
 /// Host path string suitable for Docker bind mounts. Verbatim Windows paths
 /// (`\\?\...`) break Docker’s `host:container` parsing; map them to normal paths.
 fn host_path_for_docker_bind(path: &Path) -> String {
@@ -836,6 +848,8 @@ impl Compute for DockerCompute {
             host_config: Some(host_config),
             entrypoint: Some(vec!["sh".into(), "-c".into()]),
             cmd: Some(vec![command.to_string()]),
+            // Honour the user override from the definition (e.g. "0:0" for root-level repair tasks).
+            user: definition.user.clone(),
             ..Default::default()
         };
 
@@ -932,15 +946,6 @@ impl Compute for DockerCompute {
             .path(container_path)
             .build();
 
-        // `gfs commit` may have created a *partial* destination directory when the
-        // fast host snapshot (`cp`) failed mid-flight. That partial tree can contain
-        // non-traversable permissions (e.g. `000` dirs) that would prevent both
-        // cleanup and tar extraction. Be defensive here: repair + remove before
-        // unpacking the streamed snapshot.
-        if dest.exists() {
-            let _ = std::fs::remove_dir_all(dest);
-        }
-        std::fs::create_dir_all(dest).map_err(ComputeError::Io)?;
         let dest = dest.to_path_buf();
 
         // std::io::pipe() gives a synchronous (reader, writer) pair backed by
@@ -991,8 +996,9 @@ impl Compute for DockerCompute {
                 }
             }
 
-            // If a partial snapshot dir exists (created by failed host snapshot), make it
-            // traversable and remove it so the streamed snapshot can be unpacked cleanly.
+            // If a partial snapshot dir exists (from a failed host-side `cp` or a prior
+            // interrupted stream_snapshot run), repair any 000-mode dirs that would block
+            // traversal, then remove the whole tree so the fresh tar stream unpacks cleanly.
             if dest.exists() {
                 repair_tree_for_removal(&dest);
                 let _ = std::fs::remove_dir_all(&dest);
@@ -1006,9 +1012,8 @@ impl Compute for DockerCompute {
             for entry in archive.entries()? {
                 let mut entry = entry?;
                 let ty = entry.header().entry_type();
-                if ty.is_symlink() || ty.is_hard_link() {
-                    continue;
-                }
+
+                // Compute path components for all entry types.
                 let raw_path = entry.path()?.into_owned();
                 // Strip the leading directory component Docker always adds.
                 let stripped: PathBuf = raw_path.components().skip(1).collect();
@@ -1022,6 +1027,91 @@ impl Compute for DockerCompute {
                     ));
                 }
                 let dest_path = dest.join(&stripped);
+
+                if ty.is_symlink() {
+                    let raw_target = entry
+                        .header()
+                        .link_name()?
+                        .ok_or_else(|| {
+                            io::Error::new(
+                                ErrorKind::InvalidData,
+                                format!(
+                                    "stream_snapshot: symlink '{}' has no link target",
+                                    stripped.display()
+                                ),
+                            )
+                        })?
+                        .into_owned();
+
+                    if !tar_link_target_is_safe(&raw_target) {
+                        return Err(io::Error::new(
+                            ErrorKind::InvalidData,
+                            format!(
+                                "stream_snapshot: symlink '{}' has external target '{}'; \
+                                 cannot capture data outside container data dir",
+                                stripped.display(),
+                                raw_target.display()
+                            ),
+                        ));
+                    }
+                    if let Some(parent) = dest_path.parent() {
+                        std::fs::create_dir_all(parent)?;
+                        chmod_best_effort(parent, 0o755);
+                    }
+                    #[cfg(unix)]
+                    {
+                        std::os::unix::fs::symlink(&raw_target, &dest_path)?;
+                        continue;
+                    }
+                    #[cfg(not(unix))]
+                    return Err(io::Error::new(
+                        ErrorKind::Unsupported,
+                        "stream_snapshot: symlinks not supported on this platform",
+                    ));
+                }
+
+                if ty.is_hard_link() {
+                    let raw_link = entry
+                        .header()
+                        .link_name()?
+                        .ok_or_else(|| {
+                            io::Error::new(
+                                ErrorKind::InvalidData,
+                                format!(
+                                    "stream_snapshot: hard link '{}' has no source",
+                                    stripped.display()
+                                ),
+                            )
+                        })?
+                        .into_owned();
+                    let link_stripped: PathBuf = raw_link.components().skip(1).collect();
+                    if !tar_stripped_path_is_safe(&link_stripped) {
+                        return Err(io::Error::new(
+                            ErrorKind::InvalidData,
+                            format!(
+                                "stream_snapshot: hard link '{}' points to unsafe path",
+                                stripped.display()
+                            ),
+                        ));
+                    }
+                    let src = dest.join(&link_stripped);
+                    if !src.exists() {
+                        tracing::warn!(
+                            path = %stripped.display(),
+                            source = %link_stripped.display(),
+                            "stream_snapshot: hard link source not yet extracted; skipping"
+                        );
+                        continue;
+                    }
+                    if let Some(parent) = dest_path.parent() {
+                        std::fs::create_dir_all(parent)?;
+                        chmod_best_effort(parent, 0o755);
+                    }
+                    std::fs::copy(&src, &dest_path)?;
+                    files += 1;
+                    continue;
+                }
+
                 if entry.header().entry_type().is_dir() {
                     std::fs::create_dir_all(&dest_path)?;
                     chmod_best_effort(&dest_path, 0o755);
@@ -1217,6 +1307,34 @@ impl DockerCompute {
             return Err(ComputeError::Internal(msg));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tar_safety_tests {
+    use super::tar_link_target_is_safe;
+    use std::path::Path;
+
+    #[test]
+    fn relative_target_is_safe() {
+        assert!(tar_link_target_is_safe(Path::new("pg_wal")));
+        assert!(tar_link_target_is_safe(Path::new("./sub/dir")));
+    }
+
+    #[test]
+    fn empty_target_is_unsafe() {
+        assert!(!tar_link_target_is_safe(Path::new("")));
+    }
+
+    #[test]
+    fn absolute_target_is_unsafe() {
+        assert!(!tar_link_target_is_safe(Path::new("/tmp/external-wal")));
+    }
+
+    #[test]
+    fn parent_dir_component_is_unsafe() {
+        assert!(!tar_link_target_is_safe(Path::new("../escape")));
+        assert!(!tar_link_target_is_safe(Path::new("a/../../b")));
     }
 }
 
