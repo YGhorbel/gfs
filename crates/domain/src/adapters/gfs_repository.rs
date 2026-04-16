@@ -385,14 +385,17 @@ fn set_workspace_dir_permissions(path: &Path) -> std::io::Result<()> {
             };
 
             if is_permission_error {
-                let unshare = run_podman_unshare(&format!(
-                    "chmod -R 0700 {}",
-                    shell_quote(&path.to_string_lossy())
-                ));
-                if let Ok(unshare) = unshare
-                    && unshare.status.success()
+                #[cfg(target_os = "linux")]
                 {
-                    return Ok(());
+                    let unshare = run_podman_unshare(&format!(
+                        "chmod -R 0700 {}",
+                        shell_quote(&path.to_string_lossy())
+                    ));
+                    if let Ok(unshare) = unshare
+                        && unshare.status.success()
+                    {
+                        return Ok(());
+                    }
                 }
 
                 tracing::warn!(
