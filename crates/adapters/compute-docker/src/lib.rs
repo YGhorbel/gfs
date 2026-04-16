@@ -935,6 +935,38 @@ impl Compute for DockerCompute {
         result
     }
 
+    /// Stream a container's data directory out through `docker cp` and extract
+    /// it into `dest`. Used as the permission-denied fallback when the host
+    /// user cannot read files inside a bind-mounted container data dir.
+    ///
+    /// # Equivalence vs host-path snapshots
+    ///
+    /// On restore, a snapshot produced by this function must be
+    /// indistinguishable from one produced by `storage.snapshot` (the host-path
+    /// `cp --reflink=auto -a`). Three properties are worth spelling out:
+    ///
+    /// * **Directory modes.** This function chmods created directories to `0755`
+    ///   during extraction; the host path preserves whatever mode cp `-a` copied.
+    ///   Both converge because `FileStorage::snapshot` / `finalize_snapshot`
+    ///   runs `chmod -R u+rX,u-w,go-rwx` on the final tree, normalizing every
+    ///   directory to `0500` regardless of the starting mode.
+    /// * **Ownership.** This function extracts files as the host user running
+    ///   gfs. The host path preserves the container UID (e.g. `postgres:999`).
+    ///   The two diverge on disk in the snapshot, but `pre_start_repair_data_dir`
+    ///   in the checkout use case chowns the restored workspace to the target
+    ///   UID on every container start, so restored DB state is equivalent.
+    /// * **Hard-link topology.** Both paths preserve hard links (`cp -a` honors
+    ///   them; tar archives encode hard-link entries, which we recreate via
+    ///   `std::fs::hard_link`). Divergence can only occur if the hard-link
+    ///   target hasn't been extracted yet (treated as a hard error — see the
+    ///   `InvalidData` branch below) or if `hard_link` fails with EXDEV — which
+    ///   is effectively unreachable because `src` and `dest_path` both live
+    ///   under `dest`. A `warn!` fires if the EXDEV branch ever runs.
+    ///
+    /// Mode/permission clamps on individual file entries are intentionally
+    /// suppressed via `set_preserve_permissions(false)` because tar headers
+    /// from Docker may contain UID-specific modes the host user cannot stat;
+    /// the final mode is established by `finalize_snapshot`.
     #[instrument(skip(self))]
     async fn stream_snapshot(
         &self,
@@ -1119,11 +1151,21 @@ impl Compute for DockerCompute {
                         Err(e) if e.kind() != ErrorKind::PermissionDenied => {
                             // Cross-device link (EXDEV), unsupported filesystem, etc.:
                             // fall back to a regular copy so the snapshot still succeeds.
-                            tracing::debug!(
+                            //
+                            // This branch should be effectively unreachable: `src` and
+                            // `dest_path` are both below `dest` (the snapshot root), so
+                            // they share a filesystem. If this fires, the operator has
+                            // pointed `.gfs/snapshots/` at a path that crosses a mount
+                            // boundary — which breaks the hard-link topology guarantee
+                            // vs the host-snapshot path. Surfacing at `warn!` makes the
+                            // rare event observable in production logs.
+                            tracing::warn!(
                                 source = %src.display(),
                                 dest = %dest_path.display(),
                                 error = %e,
-                                "stream_snapshot: hard_link failed; falling back to copy"
+                                "stream_snapshot: hard_link failed — falling back to copy; \
+                                 snapshot's hard-link topology will differ from the source \
+                                 (possible if .gfs/snapshots/ spans a mount boundary)"
                             );
                             std::fs::copy(&src, &dest_path)?;
                         }
