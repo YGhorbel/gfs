@@ -552,8 +552,11 @@ impl<R: DatabaseProviderRegistry> CommitRepoUseCase<R> {
                     );
 
                     // Bound the time we keep the DB paused + snapshot in flight.
-                    // On timeout or stream error, clean up the partial snapshot dir
-                    // immediately so subsequent commits don't trip over it.
+                    // Partial-snapshot cleanup on error is handled by the single
+                    // synchronous cleanup path below the outer `snapshot_result`
+                    // match — do NOT call `remove_dir_all` here, which would
+                    // duplicate the work and race the uncancellable
+                    // `spawn_blocking` tar writer inside `stream_snapshot`.
                     // Unpause always happens via the outer RAII guard regardless.
                     match tokio::time::timeout(
                         Duration::from_secs(timeout_secs),
@@ -562,12 +565,8 @@ impl<R: DatabaseProviderRegistry> CommitRepoUseCase<R> {
                     .await
                     {
                         Ok(Ok(())) => {}
-                        Ok(Err(e)) => {
-                            let _ = tokio::fs::remove_dir_all(&snapshot_dest).await;
-                            return Err(CommitRepoError::Compute(e));
-                        }
+                        Ok(Err(e)) => return Err(CommitRepoError::Compute(e)),
                         Err(_elapsed) => {
-                            let _ = tokio::fs::remove_dir_all(&snapshot_dest).await;
                             return Err(CommitRepoError::Compute(ComputeError::Internal(
                                 format!("stream_snapshot timed out after {timeout_secs}s"),
                             )));
@@ -617,21 +616,36 @@ impl<R: DatabaseProviderRegistry> CommitRepoUseCase<R> {
             }
         }
 
+        // Single synchronous cleanup path for any partial snapshot tree on error.
+        //
+        // Previously this was split across three places — two inline arms inside
+        // the timeout match plus a fire-and-forget `tokio::spawn` here. The spawn
+        // was unreliable: the Tokio runtime shuts down when the CLI's top-level
+        // future returns and can cancel the cleanup task mid-run, leaving
+        // orphaned snapshot dirs on disk.
+        //
+        // Awaiting here costs at most a few seconds on a partially-written tree
+        // and guarantees the path is cleaned before this function returns (which
+        // matters for the `CommitLock` path: the next commit must not find stale
+        // state).
+        //
+        // Known residual race: `stream_snapshot` uses an uncancellable
+        // `spawn_blocking` tar writer. On timeout, the writer may still be
+        // draining the last ~64 KB of pipe buffer to disk for ~1 ms after the
+        // async future is dropped. If that overlaps with this `remove_dir_all`,
+        // a handful of stray files can leak under the partially-removed tree.
+        // Hardening requires a cooperative cancel signal for the writer and is
+        // tracked as a follow-up.
         if let Err(e) = snapshot_result {
-            // Fire-and-forget cleanup: remove any partially-written snapshot directory.
-            // We spawn a background task so the blocking `spawn_blocking` tar writer
-            // (which does not cancel on JoinHandle drop) can finish writing while we
-            // return the error immediately instead of waiting 5-7s for removal to win.
-            let cleanup_path = snapshot_dest.clone();
-            tokio::spawn(async move {
-                if let Err(rm_err) = tokio::fs::remove_dir_all(&cleanup_path).await {
-                    tracing::warn!(
-                        error = %rm_err,
-                        path = %cleanup_path.display(),
-                        "failed to remove partial snapshot on commit error"
-                    );
-                }
-            });
+            if snapshot_dest.exists()
+                && let Err(rm_err) = tokio::fs::remove_dir_all(&snapshot_dest).await
+            {
+                tracing::warn!(
+                    error = %rm_err,
+                    path = %snapshot_dest.display(),
+                    "failed to remove partial snapshot on commit error"
+                );
+            }
             return Err(e);
         }
 
