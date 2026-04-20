@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -27,6 +27,17 @@ pub enum ComputeError {
 
     #[error("instance is not paused: '{0}'")]
     NotPaused(String),
+
+    /// The runtime does not support cgroup freezing (e.g. rootless Podman on
+    /// cgroup v1).  Callers that cannot tolerate torn reads must refuse the
+    /// operation: a file-level snapshot of an unfrozen database can capture
+    /// partially-written pages and half-applied WAL records, and is NOT
+    /// crash-consistent.  `CHECKPOINT` alone does not make such a snapshot
+    /// safe — it only flushes up to a point in time; subsequent writes between
+    /// the CHECKPOINT and the snapshot read are not ordered with respect to the
+    /// per-file tar export.
+    #[error("pause not supported by runtime: {0}")]
+    PauseUnsupported(String),
 
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
@@ -135,6 +146,13 @@ pub struct ExecOutput {
     pub exit_code: i32,
     pub stdout: String,
     pub stderr: String,
+}
+
+/// Capabilities supported by a compute runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ComputeCapabilities {
+    pub supports_stream_snapshot: bool,
+    pub supports_exec_as_root: bool,
 }
 
 /// Human-readable description of the connected container runtime.
@@ -283,6 +301,29 @@ pub trait Compute: Send + Sync {
     /// Commands are executed in order; typically provided by the database provider.
     async fn prepare_for_snapshot(&self, id: &InstanceId, commands: &[String]) -> Result<()>;
 
+    /// Return runtime capabilities (used by domain-level invariants).
+    async fn capabilities(&self) -> Result<ComputeCapabilities> {
+        Ok(ComputeCapabilities {
+            supports_stream_snapshot: false,
+            supports_exec_as_root: false,
+        })
+    }
+
+    /// Execute a shell command inside the running instance.
+    ///
+    /// If `user` is `Some`, the runtime attempts to execute as that user (e.g. `"0:0"`).
+    /// Implementations may return an error if user switching is not supported.
+    async fn exec(
+        &self,
+        _id: &InstanceId,
+        _command: &str,
+        _user: Option<&str>,
+    ) -> Result<ExecOutput> {
+        Err(ComputeError::Internal(
+            "exec not supported by this compute runtime".into(),
+        ))
+    }
+
     /// Describe the connected container runtime (for example Docker or Podman).
     async fn describe_runtime(&self) -> Result<RuntimeDescriptor> {
         Ok(RuntimeDescriptor {
@@ -310,6 +351,28 @@ pub trait Compute: Send + Sync {
 
     /// Stop the instance if running, then remove it. Used when recreating a container with a new data bind.
     async fn remove_instance(&self, id: &InstanceId) -> Result<()>;
+
+    /// Stream the contents of `container_path` from inside the running instance
+    /// and unpack them into `dest` on the host.
+    ///
+    /// This is used during `gfs commit` as a permission-safe alternative to the
+    /// host-side `cp` used by the storage adapter.  The Docker daemon reads the
+    /// bind-mounted directory on behalf of the container process (which may be
+    /// root or a different UID), so the host user's read permissions on those
+    /// files do not matter.
+    ///
+    /// The default implementation returns an error; adapters that support this
+    /// operation (e.g. [`DockerCompute`]) override it.
+    async fn stream_snapshot(
+        &self,
+        _id: &InstanceId,
+        _container_path: &str,
+        _dest: &Path,
+    ) -> Result<()> {
+        Err(ComputeError::Internal(
+            "stream_snapshot not supported by this compute runtime".into(),
+        ))
+    }
 
     // -----------------------------------------------------------------------
     // Task execution (sidecar / ephemeral instances)
