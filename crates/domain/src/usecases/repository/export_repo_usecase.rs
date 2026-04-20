@@ -581,7 +581,10 @@ mod tests {
             .run(dir.path(), Some(PathBuf::from("rel_out")), "sql")
             .await
             .unwrap();
-        assert_eq!(output.file_path, dir.path().join("rel_out").join("export.sql"));
+        assert_eq!(
+            output.file_path,
+            dir.path().join("rel_out").join("export.sql")
+        );
     }
 
     #[tokio::test]
